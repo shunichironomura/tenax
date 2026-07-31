@@ -1,14 +1,22 @@
+#:tombi toml-version = "v1.0.0"
+
 [package]
 name = "tenax"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Scenario discovery and robust decision-making under deep uncertainty"
-repository = "https://github.com/shunichironomura/tenax"
 readme = "README.md"
+repository = "https://github.com/shunichironomura/tenax"
 license = "MIT OR Apache-2.0"
-keywords = ["scenario-discovery", "prim", "uncertainty", "decision-making"]
-categories = ["algorithms", "science", "mathematics"]
+keywords = [
+  "decision-making",
+  "prim",
+  "robust decision-making",
+  "scenario-discovery",
+  "uncertainty"
+]
+categories = ["algorithms", "mathematics", "science"]
 
 [dependencies]
 thiserror = "2.0.19"
