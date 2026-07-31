@@ -93,3 +93,12 @@ A model evaluator maps a batch of input configurations to model outputs. It may 
 
 - Implementing users' domain-specific simulation models. Tenax treats those models as evaluators.
 - Building a dedicated high-density visualization engine. Tenax should expose results in formats that work with visualization libraries such as [Datashader](https://datashader.org/) and [XY](https://reflex.dev/docs/xy/).
+
+## License
+
+Licensed under either of:
+
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.

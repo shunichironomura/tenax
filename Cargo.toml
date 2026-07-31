@@ -6,6 +6,9 @@ rust-version = "1.85"
 description = "Scenario discovery and robust decision-making under deep uncertainty"
 repository = "https://github.com/shunichironomura/tenax"
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["scenario-discovery", "prim", "uncertainty", "decision-making"]
+categories = ["algorithms", "science", "mathematics"]
 
 [dependencies]
 thiserror = "2.0.19"
@@ -13,3 +16,37 @@ thiserror = "2.0.19"
 [dev-dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+
+[lints.clippy]
+all = "warn"
+allow_attributes = { level = "warn", priority = 1 }
+allow_attributes_without_reason = { level = "warn", priority = 1 }
+cargo = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }  # deny-by-default
+dbg_macro = { level = "warn", priority = 1 }
+decimal_literal_representation = { level = "warn", priority = 1 }
+derive_partial_eq_without_eq = { level = "allow", priority = 1 }  # We implement `Eq` only when necessary
+else_if_without_else = { level = "warn", priority = 1 }
+expect_used = { level = "warn", priority = 1 }
+indexing_slicing = { level = "allow", priority = 1 }  # TODO: change to "warn" later
+missing_errors_doc = { level = "allow", priority = 1 }  # TODO: change to "warn" later
+missing_panics_doc = { level = "allow", priority = 1 }  # TODO: change to "warn" later
+multiple_crate_versions = { level = "allow", priority = 1 }  # There is nothing we can do about this
+nursery = { level = "warn", priority = -1 }
+panic = { level = "warn", priority = 1 }
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+print_stderr = { level = "warn", priority = 1 }
+print_stdout = { level = "warn", priority = 1 }
+style = { level = "warn", priority = -1 }  # warn-by-default
+suspicious = { level = "warn", priority = -1 }
+todo = { level = "warn", priority = 1 }
+undocumented_unsafe_blocks = { level = "warn", priority = 1 }
+unimplemented = { level = "warn", priority = 1 }
+unreachable = { level = "warn", priority = 1 }
+unwrap_used = { level = "warn", priority = 1 }
+
+[lints.rust]
+missing-docs = "warn"
+unsafe-code = "forbid"
