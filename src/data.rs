@@ -87,7 +87,7 @@ impl Feature {
 
     /// Returns the number of observations in the feature.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match &self.data {
             FeatureData::Continuous(values) => values.len(),
             FeatureData::Integer(values) => values.len(),
@@ -100,7 +100,7 @@ impl Feature {
     /// Valid features are never empty; this method is provided for symmetry
     /// with other collection-like APIs.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -188,7 +188,7 @@ impl Dataset {
 
     /// Returns the number of observations.
     #[must_use]
-    pub fn row_count(&self) -> usize {
+    pub const fn row_count(&self) -> usize {
         self.cases_of_interest.len()
     }
 

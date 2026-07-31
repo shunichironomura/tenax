@@ -454,40 +454,43 @@ impl<'data> Prim<'data> {
             PrimPhase::Initial,
         );
 
-        while let Some(candidate) = self.best_peel(&current) {
-            let mass_old = self.mass_of(&current.indices);
-            let mass_new = self.mass_of(&candidate.indices);
-
-            if mass_new >= self.config.mass_min && mass_new < mass_old && candidate.score > 0.0 {
-                let next = self.make_step(candidate.limits, candidate.indices, PrimPhase::Peel);
-                trajectory.push(current);
-                current = next;
-            } else {
-                break;
-            }
+        while let Some(candidate) = self.best_peel(&current)
+            && self.accepts_peel(&current, &candidate)
+        {
+            let next = self.make_step(candidate.limits, candidate.indices, PrimPhase::Peel);
+            trajectory.push(current);
+            current = next;
         }
 
-        while let Some(candidate) = self.best_paste(&current) {
-            let mass_old = self.mass_of(&current.indices);
-            let mass_new = self.mass_of(&candidate.indices);
-            let mean_old = mean(self.dataset, &current.indices);
-            let mean_new = mean(self.dataset, &candidate.indices);
-
-            if mass_new >= self.config.mass_min
-                && mass_new > mass_old
-                && candidate.score > 0.0
-                && mean_new > mean_old
-            {
-                let next = self.make_step(candidate.limits, candidate.indices, PrimPhase::Paste);
-                trajectory.push(current);
-                current = next;
-            } else {
-                break;
-            }
+        while let Some(candidate) = self.best_paste(&current)
+            && self.accepts_paste(&current, &candidate)
+        {
+            let next = self.make_step(candidate.limits, candidate.indices, PrimPhase::Paste);
+            trajectory.push(current);
+            current = next;
         }
 
         trajectory.push(current);
         PrimBox { trajectory }
+    }
+
+    /// A peel must shrink the box, leave it above the minimum mass, and improve
+    /// the objective.
+    fn accepts_peel(&self, current: &BoxStep, candidate: &Candidate) -> bool {
+        let mass_old = self.mass_of(&current.indices);
+        let mass_new = self.mass_of(&candidate.indices);
+        mass_new >= self.config.mass_min && mass_new < mass_old && candidate.score > 0.0
+    }
+
+    /// A paste must grow the box, stay above the minimum mass, and improve both
+    /// the objective and the mean outcome.
+    fn accepts_paste(&self, current: &BoxStep, candidate: &Candidate) -> bool {
+        let mass_old = self.mass_of(&current.indices);
+        let mass_new = self.mass_of(&candidate.indices);
+        mass_new >= self.config.mass_min
+            && mass_new > mass_old
+            && candidate.score > 0.0
+            && mean(self.dataset, &candidate.indices) > mean(self.dataset, &current.indices)
     }
 
     /// Returns the fraction of all dataset rows covered by `indices`.
