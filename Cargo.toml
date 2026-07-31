@@ -1,0 +1,15 @@
+[package]
+name = "tenax"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Scenario discovery and robust decision-making under deep uncertainty"
+repository = "https://github.com/shunichironomura/tenax"
+readme = "README.md"
+
+[dependencies]
+thiserror = "2.0.19"
+
+[dev-dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

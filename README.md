@@ -2,11 +2,64 @@
 
 > Hold fast under uncertainty.
 
-**Status:** Tenax is in the early design stage; no usable release is available yet.
+**Status:** Roadmap step 1 is implemented as an experimental Rust library. The API is not yet stable and no release has been published.
 
 Tenax is a Rust-first toolkit for scenario discovery and robust decision-making under deep uncertainty (DMDU). Scenario discovery identifies combinations of uncertain inputs under which a candidate policy succeeds or fails. Tenax aims to support both analysis of existing experiment data and adaptive evaluation of callable simulation models.
 
 The initial algorithmic focus is the Patient Rule Induction Method (PRIM). Additional scenario-discovery and DMDU methods, such as Classification and Regression Trees (CART), may follow once that foundation has been validated.
+
+## Current functionality
+
+Tenax currently implements conventional Patient Rule Induction Method (PRIM) analysis for static binary input/output datasets:
+
+- Continuous, integer, and categorical input features.
+- EMA Workbench's `lenient1` default objective, the `lenient2` objective, and the original PRIM objective.
+- Quantile-based peeling, data-aware categorical peeling, and pasting.
+- Complete candidate trajectories with box limits, member row indices, coverage, density, mass, restricted-dimension counts, and one-sided quasi-p values.
+- Repeated box discovery with the members of each final box removed from subsequent searches.
+
+`true` output values identify the cases of interest. A minimal analysis looks like this:
+
+```rust
+use tenax::{Dataset, Feature, Objective, Prim, PrimConfig, PrimError};
+
+fn main() -> Result<(), PrimError> {
+    let data = Dataset::new(
+        vec![
+            Feature::continuous("load", vec![0.1, 0.4, 0.8, 0.9])?,
+            Feature::categorical(
+                "regime",
+                ["stable", "stable", "fragile", "fragile"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            )?,
+        ],
+        vec![false, false, true, true],
+    )?;
+    let config = PrimConfig::new(0.1, 0.1, 0.25, Objective::Lenient1)?;
+    let first_box = Prim::new(&data, config).find_box().unwrap();
+
+    for candidate in first_box.trajectory() {
+        println!("{:?}", candidate.statistics());
+    }
+    Ok(())
+}
+```
+
+Run the test suite with `cargo test`.
+
+### Independent reference suite
+
+The integration fixture in [`tests/fixtures/ema_workbench_3_0_0.json`](tests/fixtures/ema_workbench_3_0_0.json) is generated independently by EMA Workbench 3.0.0. The Rust integration test compares every trajectory entry—including limits, selected rows, diagnostics, and quasi-p values—across all three objectives, mixed feature types, and a trajectory with explicit pasting.
+
+Regenerate the reference fixture with:
+
+```console
+./scripts/generate_ema_reference.py
+```
+
+The executable script uses `uv` inline metadata to pin EMA Workbench and does not import or invoke Tenax.
 
 ## Vision
 
@@ -29,7 +82,7 @@ A model evaluator maps a batch of input configurations to model outputs. It may 
 
 ## Roadmap
 
-1. Implement conventional PRIM for static input/output datasets and establish a correctness test suite against independent references.
+1. **Complete:** Implement conventional PRIM for static input/output datasets and establish a correctness test suite against EMA Workbench.
 2. Define a transport-independent evaluator abstraction, model schema, sampling primitives, and an in-process end-to-end workflow.
 3. Implement adaptive scenario discovery with explicit acquisition and stopping rules. Benchmark it against fixed sampling, such as Latin hypercube sampling, on representative problems.
 4. Define a remote evaluation protocol that supports schema discovery, batch evaluation, failures, cancellation, and reproducible execution. Provide a CLI client and reference servers for Rust and Python.
