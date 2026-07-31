@@ -556,6 +556,14 @@ impl<'data> Prim<'data> {
         candidates.push(self.candidate(current, lower_limits, lower_indices));
     }
 
+    /// A fully peeled-away candidate keeps the widest bound still observed in
+    /// the box, so the box's own extent is the only correct fallback. There is
+    /// no meaningful bound for an empty box, and silently substituting the
+    /// current limit would report a peel that never happened.
+    #[expect(
+        clippy::expect_used,
+        reason = "`find_box` returns early on an empty population and every accepted peel keeps mass above `mass_min`, so a box step always covers at least one row"
+    )]
     fn integer_peels(
         &self,
         current: &BoxStep,
@@ -589,7 +597,7 @@ impl<'data> Prim<'data> {
             .map(|index| values[*index])
             .max()
             .or_else(|| in_box.iter().copied().max())
-            .unwrap_or(bounds.upper);
+            .expect("a box step always covers at least one row");
         let mut upper_limits = current.limits.clone();
         integer_range_mut(&mut upper_limits, feature_index).upper = upper;
         candidates.push(self.candidate(current, upper_limits, upper_indices));
@@ -613,7 +621,7 @@ impl<'data> Prim<'data> {
             .map(|index| values[*index])
             .min()
             .or_else(|| in_box.iter().copied().min())
-            .unwrap_or(bounds.lower);
+            .expect("a box step always covers at least one row");
         let mut lower_limits = current.limits.clone();
         integer_range_mut(&mut lower_limits, feature_index).lower = lower;
         candidates.push(self.candidate(current, lower_limits, lower_indices));
@@ -1259,7 +1267,9 @@ fn binomial_greater(observed: usize, trials: usize, probability: f64) -> f64 {
     })
     .map(|(_, term)| term)
     .collect::<Vec<_>>();
-    let maximum = log_terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    // Seeded with `first`, which is itself the leading term, so the running
+    // maximum is always taken over real terms rather than a sentinel.
+    let maximum = log_terms.iter().copied().fold(first, f64::max);
     (maximum.exp()
         * log_terms
             .iter()
