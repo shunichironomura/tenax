@@ -169,37 +169,77 @@ impl Feature {
     /// empty, or the dictionary cannot be represented by `Int32` codes.
     pub fn categorical(name: impl Into<String>, values: Vec<String>) -> Result<Self, DataError> {
         let name = validate_name(name.into())?;
-        validate_not_empty(&name, &values)?;
-        if let Some(row) = values
-            .iter()
-            .position(|category| category.trim().is_empty())
-        {
-            return Err(DataError::EmptyCategoryValue { name, row });
-        }
+        let data = encode_categories(&name, values)?;
+        Ok(Self {
+            name,
+            data: FeatureData::Categorical(data),
+        })
+    }
 
-        let categories = values
+    // Normalizes a boundary dictionary without expanding every row to a String.
+    // Unreferenced values are omitted to preserve `Feature::categorical` semantics.
+    pub(crate) fn categorical_from_dictionary(
+        name: impl Into<String>,
+        codes: Vec<i32>,
+        dictionary: Vec<String>,
+    ) -> Result<Self, DataError> {
+        let name = validate_name(name.into())?;
+        validate_not_empty(&name, &codes)?;
+        let dictionary = encode_categories(&name, dictionary)?;
+        let category_count = dictionary.codes.len();
+        let category_positions = codes
+            .into_iter()
+            .enumerate()
+            .map(|(row, code)| {
+                usize::try_from(code)
+                    .ok()
+                    .and_then(|position| dictionary.codes.get(position))
+                    .copied()
+                    .and_then(|normalized| usize::try_from(normalized).ok())
+                    .map(|position| (code, position))
+                    .ok_or_else(|| DataError::InvalidCategoryCode {
+                        name: name.clone(),
+                        row,
+                        code,
+                        category_count,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let used_positions = category_positions
             .iter()
-            .cloned()
+            .map(|(_, position)| *position)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        if i32::try_from(categories.len() - 1).is_err() {
-            return Err(DataError::TooManyCategories {
-                name,
-                count: categories.len(),
-            });
-        }
-        let codes = values
+        let categories = dictionary
+            .categories
             .into_iter()
-            .map(|value| {
-                let index = categories.partition_point(|candidate| candidate < &value);
-                i32::try_from(index).map_err(|_| DataError::TooManyCategories {
+            .enumerate()
+            .filter_map(|(position, category)| {
+                used_positions
+                    .binary_search(&position)
+                    .is_ok()
+                    .then_some(category)
+            })
+            .collect();
+        let codes = category_positions
+            .into_iter()
+            .enumerate()
+            .map(|(row, (code, position))| {
+                let normalized = used_positions.binary_search(&position).map_err(|_| {
+                    DataError::InvalidCategoryCode {
+                        name: name.clone(),
+                        row,
+                        code,
+                        category_count,
+                    }
+                })?;
+                i32::try_from(normalized).map_err(|_| DataError::TooManyCategories {
                     name: name.clone(),
-                    count: categories.len(),
+                    count: used_positions.len(),
                 })
             })
             .collect::<Result<_, _>>()?;
-
         Ok(Self {
             name,
             data: FeatureData::Categorical(CategoricalData { categories, codes }),
@@ -370,6 +410,44 @@ impl Dataset {
     }
 }
 
+fn encode_categories(name: &str, values: Vec<String>) -> Result<CategoricalData, DataError> {
+    validate_not_empty(name, &values)?;
+    if let Some(row) = values
+        .iter()
+        .position(|category| category.trim().is_empty())
+    {
+        return Err(DataError::EmptyCategoryValue {
+            name: name.to_owned(),
+            row,
+        });
+    }
+
+    let categories = values
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if i32::try_from(categories.len() - 1).is_err() {
+        return Err(DataError::TooManyCategories {
+            name: name.to_owned(),
+            count: categories.len(),
+        });
+    }
+    let codes = values
+        .into_iter()
+        .map(|value| {
+            let index = categories.partition_point(|candidate| candidate < &value);
+            i32::try_from(index).map_err(|_| DataError::TooManyCategories {
+                name: name.to_owned(),
+                count: categories.len(),
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    Ok(CategoricalData { categories, codes })
+}
+
 fn validate_name(name: String) -> Result<String, DataError> {
     if name.trim().is_empty() {
         Err(DataError::EmptyFeatureName)
@@ -412,6 +490,35 @@ mod tests {
         assert_eq!(view.codes(), [1, 0, 1]);
         assert_eq!(view.category(0), Some("alpha"));
         assert_eq!(view.category(-1), None);
+    }
+
+    #[test]
+    fn categorical_dictionary_construction_normalizes_codes_without_expanding_rows() {
+        let feature = Feature::categorical_from_dictionary(
+            "mode",
+            vec![0, 1, 0],
+            vec!["zeta".to_owned(), "alpha".to_owned()],
+        )
+        .unwrap();
+        let FeatureView::Categorical(view) = feature.view() else {
+            panic!("dictionary constructor returned a different feature kind");
+        };
+        assert_eq!(view.categories(), ["alpha", "zeta"]);
+        assert_eq!(view.codes(), [1, 0, 1]);
+
+        assert!(matches!(
+            Feature::categorical_from_dictionary(
+                "mode",
+                vec![2],
+                vec!["zeta".to_owned(), "alpha".to_owned()]
+            ),
+            Err(DataError::InvalidCategoryCode {
+                row: 0,
+                code: 2,
+                category_count: 2,
+                ..
+            })
+        ));
     }
 
     #[test]

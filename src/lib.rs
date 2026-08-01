@@ -4,10 +4,11 @@
 //! The current release implements conventional Patient Rule Induction Method
 //! (PRIM) analysis for static binary input/output datasets, plus a validated
 //! model schema, reproducible uniform sampler, transport-independent evaluator
-//! interface, and sequential and Rayon-parallel in-process workflows. PRIM
-//! supports continuous, integer, and categorical inputs and returns the complete
-//! peeling and pasting trajectory with coverage, density, mass, and quasi-p
-//! diagnostics.
+//! interface, and sequential and Rayon-parallel in-process workflows. The
+//! optional `arrow` feature adds validated model-schema and evaluation-request
+//! interchange. PRIM supports continuous, integer, and categorical inputs and
+//! returns the complete peeling and pasting trajectory with coverage, density,
+//! mass, and quasi-p diagnostics.
 //!
 //! # Example
 //!
@@ -75,6 +76,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#[cfg(feature = "arrow")]
+pub mod arrow;
 mod data;
 mod error;
 mod evaluation;
