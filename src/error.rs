@@ -1,8 +1,8 @@
 use thiserror::Error;
 
-/// Errors raised while constructing PRIM inputs or configuration.
+/// Errors raised while constructing native feature columns or static datasets.
 #[derive(Debug, Error, PartialEq)]
-pub enum PrimError {
+pub enum DataError {
     /// A feature name is empty or contains only whitespace.
     #[error("feature names must not be empty")]
     EmptyFeatureName,
@@ -15,11 +15,11 @@ pub enum PrimError {
     },
 
     /// No input features were supplied.
-    #[error("a PRIM dataset must contain at least one feature")]
+    #[error("a dataset must contain at least one feature")]
     NoFeatures,
 
     /// No outcomes were supplied.
-    #[error("a PRIM dataset must contain at least one outcome")]
+    #[error("a dataset must contain at least one outcome")]
     NoOutcomes,
 
     /// A feature and the outcome have different row counts.
@@ -51,6 +51,28 @@ pub enum PrimError {
         value: f64,
     },
 
+    /// A categorical feature contains an empty or whitespace-only value.
+    #[error("feature '{name}' contains an empty category at row {row}")]
+    EmptyCategoryValue {
+        /// The feature containing the invalid value.
+        name: String,
+        /// Zero-based row containing the invalid value.
+        row: usize,
+    },
+
+    /// A categorical feature cannot be represented by `Int32` codes.
+    #[error("feature '{name}' has {count} categories, exceeding the Int32 code space")]
+    TooManyCategories {
+        /// The feature containing too many distinct values.
+        name: String,
+        /// Number of distinct categories.
+        count: usize,
+    },
+}
+
+/// Errors raised while constructing PRIM algorithm configuration.
+#[derive(Debug, Error, PartialEq)]
+pub enum PrimError {
     /// A PRIM tuning parameter is outside its supported interval.
     #[error("invalid {parameter}={value}: {requirement}")]
     InvalidParameter {
