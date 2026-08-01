@@ -1,4 +1,4 @@
-//! Exercises the complete seeded sample → parallel evaluate → PRIM Phase B workflow.
+//! Exercises the complete seeded sample → parallel evaluate → PRIM workflow.
 
 use std::collections::BTreeSet;
 
@@ -54,7 +54,7 @@ fn sampling_through_in_process_evaluation_recovers_the_known_failure_region() {
     );
     let request = sample_uniform(&schema, 5_000, 0x5eed, 0).unwrap();
     let retained_request: EvalRequest = request.clone();
-    let result = evaluator.evaluate(vec![request]).next().unwrap();
+    let result = evaluator.evaluate(vec![request]).next().unwrap().unwrap();
     let dataset = evaluation_to_dataset(&schema, retained_request, result, failure).unwrap();
 
     let config = PrimConfig::new(0.05, 0.05, 0.05, Objective::Lenient1).unwrap();

@@ -3,10 +3,12 @@
 //!
 //! The current release implements conventional Patient Rule Induction Method
 //! (PRIM) analysis for static binary input/output datasets, plus a validated
-//! model schema, reproducible uniform sampler, transport-independent evaluator
-//! interface, and sequential and Rayon-parallel in-process workflows. The
-//! optional `arrow` feature adds validated model-schema and evaluation-request
-//! interchange. PRIM supports continuous, integer, and categorical inputs and
+//! model schema, reproducible uniform and Latin-hypercube samplers,
+//! transport-independent evaluator interface, and sequential and
+//! Rayon-parallel in-process workflows. The optional `arrow` feature adds
+//! validated model-schema, fixed-schema request, and per-row result
+//! interchange; `stdio` adds a persistent Arrow IPC subprocess evaluator. PRIM
+//! supports continuous, integer, and categorical inputs and
 //! returns the complete peeling and pasting trajectory with coverage, density,
 //! mass, and quasi-p diagnostics.
 //!
@@ -69,7 +71,7 @@
 //! let result = evaluator
 //!     .evaluate(vec![request])
 //!     .next()
-//!     .expect("one request produces one result");
+//!     .expect("one request produces one result")?;
 //! let dataset = evaluation_to_dataset(&schema, retained, result, failure)?;
 //!
 //! assert_eq!(dataset.row_count(), 1_000);
@@ -87,13 +89,15 @@ mod prim;
 mod sampling;
 mod schema;
 mod seed;
+#[cfg(feature = "stdio")]
+pub mod stdio;
 
 pub use data::{CategoricalView, Dataset, Feature, FeatureKind, FeatureView};
 pub use error::{DataError, PrimError};
 pub use evaluation::{
     ChunkResult, ChunkResultError, EvalRequest, EvaluationDatasetError, EvaluationId, Evaluator,
-    InProcessEvaluator, ModelError, ModelPanic, OutputRow, OutputRowError, OutputValue, RowContext,
-    RowFailure, RowOutcome, evaluation_to_dataset,
+    EvaluatorFailure, EvaluatorFailureKind, InProcessEvaluator, ModelError, ModelPanic, OutputRow,
+    OutputRowError, OutputValue, RowContext, RowFailure, RowOutcome, evaluation_to_dataset,
 };
 pub use input::{InputAccessError, InputChunk, InputChunkError, InputRow, InputValue};
 pub use parallel::{ChunkingPolicy, ChunkingPolicyError, ParallelInProcessEvaluator};
@@ -101,9 +105,11 @@ pub use prim::{
     BoxLimits, BoxStatistics, BoxStep, CategorySet, ContinuousRange, FeatureLimit, IntegerRange,
     Objective, Prim, PrimBox, PrimConfig, PrimPhase, QuasiPValue, Restriction,
 };
-pub use sampling::{SamplingError, sample_uniform};
+pub use sampling::{SamplingError, sample_latin_hypercube, sample_uniform};
 pub use schema::{
     CategoricalDomain, ContinuousDomain, FeatureDomain, InputPosition, InputSchema, IntegerDomain,
     ModelFieldRole, ModelSchema, OutputKind, OutputPosition, OutputSchema, SchemaError,
     SchemaLookupError,
 };
+#[cfg(feature = "stdio")]
+pub use stdio::{StdioError, StdioEvaluator, StdioServerError, serve_stdio};

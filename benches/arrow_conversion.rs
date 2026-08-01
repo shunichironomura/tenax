@@ -1,4 +1,4 @@
-//! Measures the validated 160 MB native/Arrow request conversion boundary.
+//! Measures validated conversion of 160 MB of inputs plus 24 MB of context.
 
 use std::hint::black_box;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use tenax::{
 
 const ROW_COUNT: usize = 1_000_000;
 const FEATURE_COUNT: usize = 20;
-const PAYLOAD_BYTES: u64 = 160_000_000;
+const WIRE_BYTES: u64 = 184_000_000;
 
 #[expect(
     clippy::expect_used,
@@ -57,7 +57,7 @@ fn fixture() -> (ModelSchema, EvalRequest, RecordBatch) {
 fn arrow_conversion(criterion: &mut Criterion) {
     let (schema, request, batch) = fixture();
     let mut group = criterion.benchmark_group("arrow_conversion/1m_rows_x_20_f64");
-    group.throughput(Throughput::Bytes(PAYLOAD_BYTES));
+    group.throughput(Throughput::Bytes(WIRE_BYTES));
 
     group.bench_function("native_to_arrow", |bencher| {
         bencher.iter(|| {

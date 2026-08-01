@@ -1,4 +1,4 @@
-//! End-to-end Phase B workflow for EMA Workbench's DPS lake problem.
+//! End-to-end in-process workflow for EMA Workbench's DPS lake problem.
 //!
 //! Run with `cargo run --release --example lake_model`, then render the
 //! exported PRIM trajectory with `./examples/lake_model/plot.py`.
@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = evaluator
         .evaluate(vec![request])
         .next()
-        .ok_or(ExampleError::MissingEvaluationResult)?;
+        .ok_or(ExampleError::MissingEvaluationResult)??;
     let dataset = evaluation_to_dataset(&schema, retained_request, result, desirable)?;
     let mut prim = Prim::new(&dataset, tenax::PrimConfig::default());
     let first_box = prim.find_box().ok_or(ExampleError::MissingPrimBox)?;

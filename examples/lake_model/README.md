@@ -1,6 +1,6 @@
 # DPS lake model: sample → evaluate → PRIM → visualize
 
-This example runs Tenax's complete Phase B workflow on the Direct Policy Search
+This example runs Tenax's complete in-process workflow on the Direct Policy Search
 (DPS) lake problem from the EMA Workbench [open-exploration
 tutorial](https://emaworkbench.readthedocs.io/en/latest/indepth_tutorial/open-exploration.html):
 
@@ -102,8 +102,8 @@ are high, with an additional weaker natural-inflow restriction.
 This is intentionally an example of **Tenax's current workflow**, not a
 byte-for-byte reproduction of EMA Workbench's notebook output:
 
-- Tenax currently has seeded independent uniform sampling, not Latin hypercube
-  sampling. It jointly samples 5,000 uncertainty-policy rows instead of taking
+- This pinned example deliberately uses Tenax's seeded independent uniform
+  sampler rather than its Latin-hypercube sampler. It jointly samples 5,000 uncertainty-policy rows instead of taking
   a full factorial product of 1,000 scenarios and five policies.
 - The current schema does not yet distinguish uncertainties from levers; all
   ten inputs are ordinary typed features for PRIM.
@@ -114,8 +114,7 @@ byte-for-byte reproduction of EMA Workbench's notebook output:
   stochastic samples and exact trajectory differ.
 - Evaluation uses Rayon's global thread pool with an explicit 16-row work-chunk
   policy. Result rows are restored to request order, so parallel scheduling does
-  not change row seeds or the pinned trajectory. Latin hypercube sampling is
-  deferred to a later roadmap phase.
+  not change row seeds or the pinned trajectory.
 - XY does not yet provide a dedicated scatter-matrix composition, so the three
   single-panel plots use XY while the pairwise scatter-and-box matrix uses
   Matplotlib.

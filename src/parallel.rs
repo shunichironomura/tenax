@@ -1,5 +1,6 @@
 //! Rayon-backed execution for row-at-a-time in-process models.
 
+use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, mpsc};
 
@@ -129,11 +130,16 @@ where
         + Sync
         + 'static,
 {
+    type Error = Infallible;
+
     fn schema(&self) -> &ModelSchema {
         &self.schema
     }
 
-    fn evaluate(&self, requests: Vec<EvalRequest>) -> Box<dyn Iterator<Item = ChunkResult> + '_> {
+    fn evaluate(
+        &self,
+        requests: Vec<EvalRequest>,
+    ) -> Box<dyn Iterator<Item = Result<ChunkResult, Self::Error>> + '_> {
         let (sender, receiver) = mpsc::channel();
         for request in requests {
             let schema = Arc::clone(&self.schema);
@@ -146,7 +152,7 @@ where
             });
         }
         drop(sender);
-        Box::new(receiver.into_iter())
+        Box::new(receiver.into_iter().map(Ok))
     }
 }
 
@@ -243,8 +249,12 @@ mod tests {
             ParallelInProcessEvaluator::new(schema(), model, ChunkingPolicy::new(3).unwrap());
         let request = request(9, vec![0, 1, 2, 3]);
 
-        let fine_result = fine.evaluate(vec![request.clone()]).next().unwrap();
-        let coarse_result = coarse.evaluate(vec![request]).next().unwrap();
+        let fine_result = fine
+            .evaluate(vec![request.clone()])
+            .next()
+            .unwrap()
+            .unwrap();
+        let coarse_result = coarse.evaluate(vec![request]).next().unwrap().unwrap();
 
         assert_eq!(fine_result, coarse_result);
     }
@@ -279,11 +289,11 @@ mod tests {
         );
         let mut results = evaluator.evaluate(vec![request(10, vec![0]), request(11, vec![1])]);
 
-        let completed_first = results.next().unwrap();
+        let completed_first = results.next().unwrap().unwrap();
         let (lock, condition) = &*gate;
         *lock.lock().unwrap() = true;
         condition.notify_one();
-        let completed_second = results.next().unwrap();
+        let completed_second = results.next().unwrap().unwrap();
 
         assert_eq!(completed_first.id(), EvaluationId::new(11));
         assert_eq!(completed_second.id(), EvaluationId::new(10));
@@ -314,6 +324,7 @@ mod tests {
         let result = evaluator
             .evaluate(vec![request(20, vec![0, 1, 2, 3])])
             .next()
+            .unwrap()
             .unwrap();
 
         assert_eq!(
