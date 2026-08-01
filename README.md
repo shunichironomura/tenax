@@ -2,7 +2,7 @@
 
 > Hold fast under uncertainty.
 
-**Status:** Roadmap step 1 is implemented as an experimental Rust library. The API is not yet stable and no release has been published.
+**Status:** Roadmap step 1 and the Phase A in-process slice of step 2 are implemented as an experimental Rust library. The API is not yet stable and no release has been published.
 
 Tenax is a Rust-first toolkit for scenario discovery and robust decision-making under deep uncertainty (DMDU). Scenario discovery identifies combinations of uncertain inputs under which a candidate policy succeeds or fails. Tenax aims to support both analysis of existing experiment data and adaptive evaluation of callable simulation models.
 
@@ -10,7 +10,16 @@ The initial algorithmic focus is the Patient Rule Induction Method (PRIM). Addit
 
 ## Current functionality
 
-Tenax currently implements conventional Patient Rule Induction Method (PRIM) analysis for static binary input/output datasets:
+Tenax currently provides a complete single-process path from a callable model to scenario discovery:
+
+- Validated model schemas with continuous and integer bounds, categorical domains, binary outputs, and optional input units.
+- Deterministic seeded uniform sampling with stable evaluation IDs and explicit model seeds.
+- A synchronous, transport-independent, batch-in/chunk-stream-out `Evaluator` trait.
+- Per-row success or failure data and a single-threaded in-process closure evaluator.
+- Zero-copy borrowed column views over the native `Vec`-backed container, including deterministic `Int32` categorical dictionary codes.
+- Explicit conversion of a successful evaluated chunk into a static PRIM dataset; failed rows are rejected rather than silently dropped.
+
+Tenax also implements conventional Patient Rule Induction Method (PRIM) analysis for static binary input/output datasets:
 
 - Continuous, integer, and categorical input features.
 - EMA Workbench's `lenient1` default objective, the `lenient2` objective, and the original PRIM objective.
@@ -21,9 +30,9 @@ Tenax currently implements conventional Patient Rule Induction Method (PRIM) ana
 `true` output values identify the cases of interest. A minimal analysis looks like this:
 
 ```rust
-use tenax::{Dataset, Feature, Objective, Prim, PrimConfig, PrimError};
+use tenax::{Dataset, Feature, Objective, Prim, PrimConfig};
 
-fn main() -> Result<(), PrimError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = Dataset::new(
         vec![
             Feature::continuous("load", vec![0.1, 0.4, 0.8, 0.9])?,
@@ -47,7 +56,55 @@ fn main() -> Result<(), PrimError> {
 }
 ```
 
-Run the test suite with `cargo test`.
+### In-process model workflow
+
+A callable model uses the same schema and columnar request types that future process and network adapters will use:
+
+```rust
+use tenax::{
+    Evaluator, InProcessEvaluator, InputRow, InputSchema, InputValue, ModelError,
+    ModelSchema, OutputSchema, OutputValue, RowContext, evaluation_to_dataset,
+    sample_uniform,
+};
+
+let schema = ModelSchema::new(
+    vec![InputSchema::continuous("load", 0.0, 1.0)?],
+    vec![OutputSchema::boolean("failure")?],
+)?;
+let load_position = schema.input_position("load")?;
+let failure_position = schema.output_position("failure")?;
+let evaluator = InProcessEvaluator::new(
+    schema.clone(),
+    move |row: InputRow<'_>, _context: RowContext| {
+        let InputValue::Continuous(load) = row
+            .value(load_position)
+            .map_err(|error| ModelError::new(error.to_string()))?
+        else {
+            return Err(ModelError::new("load must be continuous"));
+        };
+        Ok(vec![OutputValue::Boolean(load >= 0.7)])
+    },
+);
+
+let request = sample_uniform(&schema, 1_000, 42, 0)?;
+let retained_request = request.clone();
+let result = evaluator
+    .evaluate(vec![request])
+    .next()
+    .expect("one request produces one result chunk");
+let dataset = evaluation_to_dataset(
+    &schema,
+    retained_request,
+    result,
+    failure_position,
+)?;
+assert_eq!(dataset.row_count(), 1_000);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The evaluator yields one `ChunkResult` per request and may yield chunks out of request order. Each result retains row order within its request. The Phase A in-process evaluator is sequential; parallel and remote drivers are deferred.
+
+Run the complete test suite with `cargo test --all-targets --all-features`.
 
 ### Independent reference suite
 
@@ -83,7 +140,7 @@ A model evaluator maps a batch of input configurations to model outputs. It may 
 ## Roadmap
 
 1. **Complete:** Implement conventional PRIM for static input/output datasets and establish a correctness test suite against EMA Workbench.
-2. Define a transport-independent evaluator abstraction, model schema, sampling primitives, and an in-process end-to-end workflow.
+2. **In progress:** Phase A implements the transport-independent evaluator abstraction, validated model schema, seeded uniform sampling, and an in-process end-to-end workflow. Parallel execution, Arrow interchange, and process transports remain.
 3. Implement adaptive scenario discovery with explicit acquisition and stopping rules. Benchmark it against fixed sampling, such as Latin hypercube sampling, on representative problems.
 4. Define a remote evaluation protocol that supports schema discovery, batch evaluation, failures, cancellation, and reproducible execution. Provide a CLI client and reference servers for Rust and Python.
 5. Publish a Python package that wraps the Rust core through PyO3 and provides a notebook-friendly API.

@@ -19,6 +19,8 @@ keywords = [
 categories = ["algorithms", "mathematics", "science"]
 
 [dependencies]
+rand = { version = "0.10.2", default-features = false, features = ["std"] }
+rand_chacha = "0.10.0"
 thiserror = "2.0.19"
 
 [dev-dependencies]

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use crate::PrimError;
-use crate::data::{Dataset, FeatureData, FeatureKind};
+use crate::data::{CategoricalView, Dataset, FeatureKind, FeatureView};
 
 /// The score used to rank candidate peels and pastes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -150,6 +150,7 @@ impl IntegerRange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CategorySet {
     values: BTreeSet<String>,
+    codes: BTreeSet<i32>,
 }
 
 impl CategorySet {
@@ -506,14 +507,14 @@ impl<'data> Prim<'data> {
             FeatureKind::Categorical,
         ] {
             for feature_index in self.feature_indices(kind) {
-                match &self.dataset.features()[feature_index].data {
-                    FeatureData::Continuous(values) => {
+                match self.dataset.features()[feature_index].view() {
+                    FeatureView::Continuous(values) => {
                         self.continuous_peels(current, feature_index, values, &mut candidates);
                     }
-                    FeatureData::Integer(values) => {
+                    FeatureView::Integer(values) => {
                         self.integer_peels(current, feature_index, values, &mut candidates);
                     }
-                    FeatureData::Categorical(values) => {
+                    FeatureView::Categorical(values) => {
                         self.categorical_peels(current, feature_index, values, &mut candidates);
                     }
                 }
@@ -634,29 +635,31 @@ impl<'data> Prim<'data> {
         &self,
         current: &BoxStep,
         feature_index: usize,
-        values: &[String],
+        values: CategoricalView<'_>,
         candidates: &mut Vec<Candidate>,
     ) {
-        let categories = category_set(&current.limits, feature_index)
+        let current_categories = category_set(&current.limits, feature_index);
+        let categories = current_categories
             .values
             .iter()
             .cloned()
+            .zip(current_categories.codes.iter().copied())
             .collect::<Vec<_>>();
         if categories.len() <= 1 {
             return;
         }
 
-        candidates.extend(categories.into_iter().map(|removed| {
+        candidates.extend(categories.into_iter().map(|(removed, removed_code)| {
             let indices = current
                 .indices
                 .iter()
                 .copied()
-                .filter(|index| values[*index] != removed)
+                .filter(|index| values.codes()[*index] != removed_code)
                 .collect();
             let mut limits = current.limits.clone();
-            category_set_mut(&mut limits, feature_index)
-                .values
-                .remove(&removed);
+            let categories = category_set_mut(&mut limits, feature_index);
+            categories.values.remove(&removed);
+            categories.codes.remove(&removed_code);
             self.candidate(current, limits, indices)
         }));
     }
@@ -672,15 +675,15 @@ impl<'data> Prim<'data> {
                 current.limits.limits[*index].restriction
                     != self.initial_limits.limits[*index].restriction
             }) {
-                match &self.dataset.features()[feature_index].data {
-                    FeatureData::Continuous(values) => {
+                match self.dataset.features()[feature_index].view() {
+                    FeatureView::Continuous(values) => {
                         self.continuous_pastes(current, feature_index, values, &mut candidates);
                     }
-                    FeatureData::Integer(values) => {
+                    FeatureView::Integer(values) => {
                         self.integer_pastes(current, feature_index, values, &mut candidates);
                     }
-                    FeatureData::Categorical(values) => {
-                        self.categorical_pastes(current, feature_index, values, &mut candidates);
+                    FeatureView::Categorical(_) => {
+                        self.categorical_pastes(current, feature_index, &mut candidates);
                     }
                 }
             }
@@ -786,20 +789,26 @@ impl<'data> Prim<'data> {
         &self,
         current: &BoxStep,
         feature_index: usize,
-        _values: &[String],
         candidates: &mut Vec<Candidate>,
     ) {
-        let current_categories = &category_set(&current.limits, feature_index).values;
-        let missing = category_set(&self.initial_limits, feature_index)
+        let current_categories = category_set(&current.limits, feature_index);
+        let initial_categories = category_set(&self.initial_limits, feature_index);
+        let missing = initial_categories
             .values
-            .difference(current_categories)
-            .cloned();
+            .difference(&current_categories.values)
+            .cloned()
+            .zip(
+                initial_categories
+                    .codes
+                    .difference(&current_categories.codes)
+                    .copied(),
+            );
 
-        candidates.extend(missing.map(|added| {
+        candidates.extend(missing.map(|(added, added_code)| {
             let mut limits = current.limits.clone();
-            category_set_mut(&mut limits, feature_index)
-                .values
-                .insert(added);
+            let categories = category_set_mut(&mut limits, feature_index);
+            categories.values.insert(added);
+            categories.codes.insert(added_code);
             let indices = rows_in_box(self.dataset, &self.remaining, &limits);
             self.candidate(current, limits, indices)
         }));
@@ -1020,8 +1029,8 @@ fn make_initial_limits(dataset: &Dataset) -> BoxLimits {
         .features()
         .iter()
         .map(|feature| {
-            let restriction = match &feature.data {
-                FeatureData::Continuous(values) => Restriction::Continuous(ContinuousRange {
+            let restriction = match feature.view() {
+                FeatureView::Continuous(values) => Restriction::Continuous(ContinuousRange {
                     lower: values
                         .iter()
                         .copied()
@@ -1033,12 +1042,13 @@ fn make_initial_limits(dataset: &Dataset) -> BoxLimits {
                         .reduce(f64::max)
                         .expect("non-empty feature"),
                 }),
-                FeatureData::Integer(values) => Restriction::Integer(IntegerRange {
+                FeatureView::Integer(values) => Restriction::Integer(IntegerRange {
                     lower: *values.iter().min().expect("non-empty feature"),
                     upper: *values.iter().max().expect("non-empty feature"),
                 }),
-                FeatureData::Categorical(values) => Restriction::Categorical(CategorySet {
-                    values: values.iter().cloned().collect(),
+                FeatureView::Categorical(values) => Restriction::Categorical(CategorySet {
+                    values: values.categories().iter().cloned().collect(),
+                    codes: values.codes().iter().copied().collect(),
                 }),
             };
             FeatureLimit {
@@ -1060,17 +1070,17 @@ fn rows_in_box(dataset: &Dataset, population: &[usize], limits: &BoxLimits) -> V
                 .iter()
                 .zip(&limits.limits)
                 .all(
-                    |(feature, limit)| match (&feature.data, &limit.restriction) {
-                        (FeatureData::Continuous(values), Restriction::Continuous(range)) => {
+                    |(feature, limit)| match (feature.view(), &limit.restriction) {
+                        (FeatureView::Continuous(values), Restriction::Continuous(range)) => {
                             range.lower <= values[*row] && values[*row] <= range.upper
                         }
-                        (FeatureData::Integer(values), Restriction::Integer(range)) => {
+                        (FeatureView::Integer(values), Restriction::Integer(range)) => {
                             range.lower <= values[*row] && values[*row] <= range.upper
                         }
                         (
-                            FeatureData::Categorical(values),
+                            FeatureView::Categorical(values),
                             Restriction::Categorical(categories),
-                        ) => categories.values.contains(&values[*row]),
+                        ) => categories.codes.contains(&values.codes()[*row]),
                         _ => schema_invariant_violated(feature.kind()),
                     },
                 )
