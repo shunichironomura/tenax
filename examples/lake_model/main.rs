@@ -1,4 +1,4 @@
-//! End-to-end Phase A workflow for EMA Workbench's DPS lake problem.
+//! End-to-end Phase B workflow for EMA Workbench's DPS lake problem.
 //!
 //! Run with `cargo run --release --example lake_model`, then render the
 //! exported PRIM trajectory with `./examples/lake_model/plot.py`.
@@ -14,14 +14,15 @@ use std::path::{Path, PathBuf};
 
 use model::{DpsPolicy, LakeModel, LakeUncertainties};
 use tenax::{
-    BoxStep, Dataset, Evaluator, FeatureDomain, FeatureView, InProcessEvaluator, InputPosition,
-    InputRow, InputSchema, InputValue, ModelError, ModelSchema, OutputSchema, OutputValue, Prim,
-    PrimBox, PrimPhase, Restriction, RowContext, SchemaLookupError, evaluation_to_dataset,
-    sample_uniform,
+    BoxStep, ChunkingPolicy, Dataset, Evaluator, FeatureDomain, FeatureView, InputPosition,
+    InputRow, InputSchema, InputValue, ModelError, ModelSchema, OutputSchema, OutputValue,
+    ParallelInProcessEvaluator, Prim, PrimBox, PrimPhase, Restriction, RowContext,
+    SchemaLookupError, evaluation_to_dataset, sample_uniform,
 };
 use thiserror::Error;
 
 const EXPERIMENT_COUNT: usize = 5_000;
+const ROWS_PER_WORK_CHUNK: usize = 16;
 const RUN_SEED: u64 = 0x5eed_1a6e;
 const REQUEST_SEQUENCE: u64 = 0;
 const MAX_PHOSPHORUS_THRESHOLD: f64 = 0.8;
@@ -116,7 +117,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let positions = LakeInputPositions::resolve(&schema)?;
     let desirable = schema.output_position("desirable_lake_state")?;
     let lake_model = LakeModel::new(UTILITY_FROM_POLLUTION, STOCHASTIC_REALIZATIONS, MODEL_YEARS)?;
-    let evaluator = InProcessEvaluator::new(
+    let evaluator = ParallelInProcessEvaluator::new(
         schema.clone(),
         move |row: InputRow<'_>, context: RowContext| {
             let (uncertainties, policy) = positions.read(row)?;
@@ -127,6 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 outcomes.max_phosphorus() < MAX_PHOSPHORUS_THRESHOLD,
             )])
         },
+        ChunkingPolicy::new(ROWS_PER_WORK_CHUNK)?,
     );
 
     let request = sample_uniform(&schema, EXPERIMENT_COUNT, RUN_SEED, REQUEST_SEQUENCE)?;
@@ -175,7 +177,7 @@ fn lake_schema() -> Result<ModelSchema, tenax::SchemaError> {
             InputSchema::continuous("r2", 0.0, 2.0)?,
             InputSchema::continuous("w1", 0.0, 1.0)?,
         ],
-        // Phase A output schemas are binary, so classification happens at the
+        // Current output schemas are binary, so classification happens at the
         // model boundary rather than in a later Python dataframe operation.
         vec![OutputSchema::boolean("desirable_lake_state")?],
     )
@@ -333,8 +335,9 @@ fn write_summary(
     let final_index = prim_box.trajectory().len() - 1;
     let final_step = prim_box.final_step();
     let statistics = final_step.statistics();
-    writeln!(writer, "EMA Workbench DPS lake model / Tenax Phase A")?;
+    writeln!(writer, "EMA Workbench DPS lake model / Tenax Phase B")?;
     writeln!(writer, "experiments: {EXPERIMENT_COUNT}")?;
+    writeln!(writer, "rows per Rayon work chunk: {ROWS_PER_WORK_CHUNK}")?;
     writeln!(writer, "run seed: {RUN_SEED}")?;
     writeln!(
         writer,

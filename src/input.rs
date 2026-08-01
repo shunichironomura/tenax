@@ -221,7 +221,7 @@ impl InputChunk {
     /// Returns [`InputAccessError`] when `index` is outside this chunk.
     pub const fn row(&self, index: usize) -> Result<InputRow<'_>, InputAccessError> {
         if index < self.row_count {
-            Ok(InputRow { chunk: self, index })
+            Ok(self.row_in_bounds(index))
         } else {
             Err(InputAccessError::RowIndexOutOfBounds {
                 index,
@@ -233,7 +233,12 @@ impl InputChunk {
     /// Iterates over borrowed rows in original order.
     #[must_use]
     pub fn rows(&self) -> impl ExactSizeIterator<Item = InputRow<'_>> {
-        (0..self.row_count).map(|index| InputRow { chunk: self, index })
+        (0..self.row_count).map(|index| self.row_in_bounds(index))
+    }
+
+    pub(super) const fn row_in_bounds(&self, index: usize) -> InputRow<'_> {
+        debug_assert!(index < self.row_count);
+        InputRow { chunk: self, index }
     }
 
     /// Consumes the chunk and returns its owned columns.

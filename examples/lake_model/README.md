@@ -1,6 +1,6 @@
 # DPS lake model: sample → evaluate → PRIM → visualize
 
-This example runs Tenax's complete Phase A workflow on the Direct Policy Search
+This example runs Tenax's complete Phase B workflow on the Direct Policy Search
 (DPS) lake problem from the EMA Workbench [open-exploration
 tutorial](https://emaworkbench.readthedocs.io/en/latest/indepth_tutorial/open-exploration.html):
 
@@ -8,7 +8,7 @@ tutorial](https://emaworkbench.readthedocs.io/en/latest/indepth_tutorial/open-ex
    `ModelSchema`;
 2. draw 5,000 deterministic uniform experiments;
 3. evaluate 150 stochastic lake realizations over 100 years for each row with
-   the sequential `InProcessEvaluator`;
+   the Rayon-backed `ParallelInProcessEvaluator` in fixed 16-row work chunks;
 4. classify `max_P < 0.8` as the case of interest;
 5. fit the first conventional PRIM box and export its complete trajectory; and
 6. use Python and [XY](https://reflex.dev/docs/xy/) to create interactive HTML
@@ -18,8 +18,7 @@ tutorial](https://emaworkbench.readthedocs.io/en/latest/indepth_tutorial/open-ex
 The lake equations and constants follow EMA Workbench's
 [`dps_lake_model.py`](https://github.com/quaquel/EMAworkbench/blob/master/docs/source/indepth_tutorial/dps_lake_model.py).
 The model calculates all four tutorial outcomes internally, although the current
-Phase A schema exposes only the binary `max_P < 0.8` classification used by
-PRIM.
+schema exposes only the binary `max_P < 0.8` classification used by PRIM.
 
 ## Run it
 
@@ -103,7 +102,7 @@ are high, with an additional weaker natural-inflow restriction.
 This is intentionally an example of **Tenax's current workflow**, not a
 byte-for-byte reproduction of EMA Workbench's notebook output:
 
-- Phase A has seeded independent uniform sampling, not Latin hypercube
+- Tenax currently has seeded independent uniform sampling, not Latin hypercube
   sampling. It jointly samples 5,000 uncertainty-policy rows instead of taking
   a full factorial product of 1,000 scenarios and five policies.
 - The current schema does not yet distinguish uncertainties from levers; all
@@ -113,8 +112,10 @@ byte-for-byte reproduction of EMA Workbench's notebook output:
 - Each row uses its deterministic `RowContext` seed and a local `ChaCha12` RNG.
   EMA Workbench's Python source uses NumPy's legacy global RNG, so the
   stochastic samples and exact trajectory differ.
-- Evaluation is sequential. Parallel execution and Latin hypercube sampling
-  are deferred to later roadmap phases.
+- Evaluation uses Rayon's global thread pool with an explicit 16-row work-chunk
+  policy. Result rows are restored to request order, so parallel scheduling does
+  not change row seeds or the pinned trajectory. Latin hypercube sampling is
+  deferred to a later roadmap phase.
 - XY does not yet provide a dedicated scatter-matrix composition, so the three
   single-panel plots use XY while the pairwise scatter-and-box matrix uses
   Matplotlib.

@@ -1,11 +1,11 @@
-//! Exercises the complete seeded sample → evaluate → PRIM Phase A workflow.
+//! Exercises the complete seeded sample → parallel evaluate → PRIM Phase B workflow.
 
 use std::collections::BTreeSet;
 
 use tenax::{
-    EvalRequest, Evaluator, InProcessEvaluator, InputPosition, InputRow, InputSchema, InputValue,
-    ModelError, ModelSchema, Objective, OutputSchema, OutputValue, Prim, PrimConfig, Restriction,
-    RowContext, SchemaError, evaluation_to_dataset, sample_uniform,
+    ChunkingPolicy, EvalRequest, Evaluator, InputPosition, InputRow, InputSchema, InputValue,
+    ModelError, ModelSchema, Objective, OutputSchema, OutputValue, ParallelInProcessEvaluator,
+    Prim, PrimConfig, Restriction, RowContext, SchemaError, evaluation_to_dataset, sample_uniform,
 };
 
 fn toy_schema() -> Result<ModelSchema, SchemaError> {
@@ -47,9 +47,10 @@ fn sampling_through_in_process_evaluation_recovers_the_known_failure_region() {
     let load = schema.input_position("load").unwrap();
     let regime = schema.input_position("regime").unwrap();
     let failure = schema.output_position("failure").unwrap();
-    let evaluator = InProcessEvaluator::new(
+    let evaluator = ParallelInProcessEvaluator::new(
         schema.clone(),
         move |row: InputRow<'_>, _context: RowContext| evaluate_toy_model(row, load, regime),
+        ChunkingPolicy::new(64).unwrap(),
     );
     let request = sample_uniform(&schema, 5_000, 0x5eed, 0).unwrap();
     let retained_request: EvalRequest = request.clone();

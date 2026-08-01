@@ -1,7 +1,9 @@
 //! Transport-independent evaluation requests, streamed chunk results, and the
 //! single-threaded in-process reference evaluator.
 
+use std::any::Any;
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use thiserror::Error;
 
@@ -96,6 +98,18 @@ pub struct RowContext {
 }
 
 impl RowContext {
+    pub(super) const fn new(
+        evaluation_id: EvaluationId,
+        request_seed: u64,
+        row_index: usize,
+    ) -> Self {
+        Self {
+            evaluation_id,
+            request_seed,
+            row_index,
+        }
+    }
+
     /// Returns the enclosing request identifier.
     #[must_use]
     pub const fn evaluation_id(&self) -> EvaluationId {
@@ -236,12 +250,50 @@ impl From<&str> for ModelError {
     }
 }
 
+/// A panic raised while invoking an in-process model row.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ModelPanic {
+    /// The panic carried a string diagnostic.
+    #[error("{0}")]
+    Message(String),
+
+    /// The panic carried an application-specific non-string payload.
+    #[error("non-string panic payload")]
+    NonStringPayload,
+}
+
+impl ModelPanic {
+    /// Returns the panic diagnostic when its payload was a string.
+    #[must_use]
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Message(message) => Some(message),
+            Self::NonStringPayload => None,
+        }
+    }
+
+    fn from_payload(payload: Box<dyn Any + Send>) -> Self {
+        match payload.downcast::<String>() {
+            Ok(message) => Self::Message(*message),
+            Err(payload) => payload
+                .downcast::<&'static str>()
+                .map_or(Self::NonStringPayload, |message| {
+                    Self::Message((*message).to_owned())
+                }),
+        }
+    }
+}
+
 /// Why one input row did not produce schema-valid outputs.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum RowFailure {
-    /// The model rejected or failed on this row.
+    /// The model rejected or returned an error for this row.
     #[error("model evaluation failed: {0}")]
     Model(#[source] ModelError),
+
+    /// The in-process model panicked while evaluating this row.
+    #[error("model evaluation panicked: {0}")]
+    Panic(#[source] ModelPanic),
 
     /// The request chunk does not satisfy this evaluator's schema.
     #[error("invalid model input: {0}")]
@@ -277,6 +329,11 @@ pub struct ChunkResult {
 }
 
 impl ChunkResult {
+    pub(super) fn from_rows(id: EvaluationId, rows: Vec<RowOutcome>) -> Self {
+        debug_assert!(!rows.is_empty());
+        Self { id, rows }
+    }
+
     /// Constructs a non-empty result chunk for custom evaluator implementations.
     ///
     /// # Errors
@@ -307,8 +364,9 @@ impl ChunkResult {
 ///
 /// A call accepts multiple request chunks and yields each completed chunk via
 /// an iterator. Implementations may return chunks out of request order. The
-/// in-process reference implementation is sequential; channel-backed and async
-/// adapters can preserve this interface without adding a runtime to the core.
+/// [`InProcessEvaluator`] preserves request order, while
+/// [`crate::ParallelInProcessEvaluator`] uses a channel to stream completion
+/// order without adding an async runtime to the core.
 pub trait Evaluator {
     /// Returns the model's validated discovery schema.
     fn schema(&self) -> &ModelSchema;
@@ -320,9 +378,9 @@ pub trait Evaluator {
 /// A single-threaded evaluator backed by a row-at-a-time Rust closure.
 ///
 /// The closure receives a zero-copy [`InputRow`] and deterministic
-/// [`RowContext`], and returns either all output values or a [`ModelError`].
-/// Panics are not caught in Phase A; failure isolation and parallel execution
-/// belong to later drivers.
+/// [`RowContext`], and returns either all output values or a [`ModelError`]. An
+/// unwinding model panic is retained as [`RowFailure::Panic`] and does not stop
+/// later rows. Panics compiled with `panic = "abort"` cannot be caught.
 pub struct InProcessEvaluator<F> {
     schema: ModelSchema,
     model: F,
@@ -348,25 +406,34 @@ where
             Ok(()) => inputs
                 .rows()
                 .map(|row| {
-                    let context = RowContext {
-                        evaluation_id: id,
-                        request_seed: seed,
-                        row_index: row.index(),
-                    };
-                    match (self.model)(row, context) {
-                        Ok(values) => match OutputRow::new(&self.schema, values) {
-                            Ok(outputs) => RowOutcome::Success(outputs),
-                            Err(error) => RowOutcome::Failure(RowFailure::InvalidOutput(error)),
-                        },
-                        Err(error) => RowOutcome::Failure(RowFailure::Model(error)),
-                    }
+                    let context = RowContext::new(id, seed, row.index());
+                    evaluate_model_row(&self.schema, &self.model, row, context)
                 })
                 .collect(),
             Err(error) => (0..inputs.row_count())
                 .map(|_| RowOutcome::Failure(RowFailure::InvalidInput(error.clone())))
                 .collect(),
         };
-        ChunkResult { id, rows }
+        ChunkResult::from_rows(id, rows)
+    }
+}
+
+pub fn evaluate_model_row<F>(
+    schema: &ModelSchema,
+    model: &F,
+    row: InputRow<'_>,
+    context: RowContext,
+) -> RowOutcome
+where
+    F: for<'data> Fn(InputRow<'data>, RowContext) -> Result<Vec<OutputValue>, ModelError>,
+{
+    match catch_unwind(AssertUnwindSafe(|| model(row, context))) {
+        Ok(Ok(values)) => match OutputRow::new(schema, values) {
+            Ok(outputs) => RowOutcome::Success(outputs),
+            Err(error) => RowOutcome::Failure(RowFailure::InvalidOutput(error)),
+        },
+        Ok(Err(error)) => RowOutcome::Failure(RowFailure::Model(error)),
+        Err(payload) => RowOutcome::Failure(RowFailure::Panic(ModelPanic::from_payload(payload))),
     }
 }
 
@@ -604,6 +671,31 @@ mod tests {
         assert!(matches!(
             result.rows()[1],
             RowOutcome::Failure(RowFailure::Model(_))
+        ));
+        assert!(matches!(result.rows()[2], RowOutcome::Success(_)));
+    }
+
+    #[test]
+    fn model_panics_are_per_row_data() {
+        let schema = schema();
+        let x = schema.input_position("x").unwrap();
+        let evaluator =
+            InProcessEvaluator::new(schema, move |row: InputRow<'_>, _| match row.value(x) {
+                Ok(InputValue::Integer(1)) => panic!("singular model state"),
+                Ok(InputValue::Integer(value)) => Ok(vec![OutputValue::Boolean(value % 2 == 0)]),
+                Ok(_) => Err(ModelError::new("wrong input kind")),
+                Err(error) => Err(ModelError::new(error.to_string())),
+            });
+        let result = evaluator
+            .evaluate(vec![request(10, vec![0, 1, 2])])
+            .next()
+            .unwrap();
+
+        assert!(matches!(result.rows()[0], RowOutcome::Success(_)));
+        assert!(matches!(
+            &result.rows()[1],
+            RowOutcome::Failure(RowFailure::Panic(ModelPanic::Message(message)))
+                if message == "singular model state"
         ));
         assert!(matches!(result.rows()[2], RowOutcome::Success(_)));
     }
