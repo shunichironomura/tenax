@@ -140,7 +140,7 @@ A model evaluator maps a batch of input configurations to model outputs. It may 
 ## Roadmap
 
 1. **Complete:** Implement conventional PRIM for static input/output datasets and establish a correctness test suite against EMA Workbench.
-2. **In progress:** Phase A implements the transport-independent evaluator abstraction, validated model schema, seeded uniform sampling, and an in-process end-to-end workflow. Parallel execution, Arrow interchange, and process transports remain.
+2. **In progress (Phase A complete):** The transport-independent evaluator abstraction, validated model schema, seeded uniform sampling, and in-process end-to-end workflow are implemented. Parallel execution, Arrow interchange, and process transports remain for Phases B–D.
 3. Implement adaptive scenario discovery with explicit acquisition and stopping rules. Benchmark it against fixed sampling, such as Latin hypercube sampling, on representative problems.
 4. Define a remote evaluation protocol that supports schema discovery, batch evaluation, failures, cancellation, and reproducible execution. Provide a CLI client and reference servers for Rust and Python.
 5. Publish a Python package that wraps the Rust core through PyO3 and provides a notebook-friendly API.
