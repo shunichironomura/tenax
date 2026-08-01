@@ -104,6 +104,21 @@ assert_eq!(dataset.row_count(), 1_000);
 
 The evaluator yields one `ChunkResult` per request and may yield chunks out of request order. Each result retains row order within its request. The Phase A in-process evaluator is sequential; parallel and remote drivers are deferred.
 
+### Lake model workflow example
+
+[`examples/lake_model/`](examples/lake_model/) applies the complete current workflow to the Direct Policy Search lake problem from EMA Workbench's open-exploration tutorial. It samples 5,000 joint uncertainty-policy inputs, evaluates the stochastic model with deterministic row seeds, classifies `max_P < 0.8`, runs PRIM, and exports the complete trajectory. A pinned Python script uses [XY](https://reflex.dev/docs/xy/) to produce interactive HTML and static PNG trade-off, experiment, and box-limit plots.
+
+```console
+cargo run --release --example lake_model
+./examples/lake_model/plot.py
+```
+
+The pinned run produces a 59-step coverage-density trajectory. Its final candidate has 35.2% coverage, 97.3% density, and 5.28% mass, restricting `b`, `q`, and `mean`.
+
+![Coverage-density trade-off for the lake model's PRIM trajectory, with the final candidate highlighted](examples/lake_model/prim_tradeoff.png)
+
+The example documents the current differences from EMA Workbench, including uniform rather than Latin hypercube sampling, joint rather than factorial experiments, binary output schemas, and sequential evaluation.
+
 Run the complete test suite with `cargo test --all-targets --all-features`.
 
 ### Independent reference suite
