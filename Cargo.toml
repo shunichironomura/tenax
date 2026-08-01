@@ -19,10 +19,11 @@ keywords = [
 categories = ["algorithms", "mathematics", "science"]
 
 [package.metadata.docs.rs]
-features = ["arrow"]
+features = ["stdio"]
 
 [dependencies]
 arrow-array = { version = "59.1.0", optional = true }
+arrow-ipc = { version = "59.1.0", optional = true }
 arrow-schema = { version = "59.1.0", optional = true }
 rand = { version = "0.10.2", default-features = false, features = ["std"] }
 rand_chacha = "0.10.0"
@@ -72,6 +73,13 @@ unsafe-code = "forbid"
 
 [features]
 arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:serde_json"]
+stdio = ["arrow", "dep:arrow-ipc"]
+
+[[test]]
+name = "stdio_workflow"
+path = "tests/stdio_workflow.rs"
+harness = false
+required-features = ["stdio"]
 
 [[bench]]
 name = "arrow_conversion"

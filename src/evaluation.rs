@@ -2,6 +2,7 @@
 //! single-threaded in-process reference evaluator.
 
 use std::any::Any;
+use std::convert::Infallible;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -210,7 +211,7 @@ impl OutputRow {
         &self.values
     }
 
-    fn validate_against(&self, schema: &ModelSchema) -> Result<(), OutputRowError> {
+    pub(crate) fn validate_against(&self, schema: &ModelSchema) -> Result<(), OutputRowError> {
         validate_output_values(schema, &self.values)
     }
 }
@@ -284,6 +285,60 @@ impl ModelPanic {
     }
 }
 
+/// Broad category of a row failure reported across an evaluator boundary.
+///
+/// Local evaluators retain their concrete [`InputChunkError`] and
+/// [`OutputRowError`] values. A process or network peer cannot reconstruct
+/// those Rust implementation types from a stable wire diagnostic, so it uses
+/// this closed boundary category instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvaluatorFailureKind {
+    /// The peer rejected the row's inputs.
+    InvalidInput,
+    /// The peer produced values that did not satisfy its declared outputs.
+    InvalidOutput,
+}
+
+impl fmt::Display for EvaluatorFailureKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput => formatter.write_str("invalid input"),
+            Self::InvalidOutput => formatter.write_str("invalid output"),
+        }
+    }
+}
+
+/// A structured row failure reported by an evaluator adapter.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[error("evaluator reported {kind}: {message}")]
+pub struct EvaluatorFailure {
+    kind: EvaluatorFailureKind,
+    message: String,
+}
+
+impl EvaluatorFailure {
+    /// Constructs a boundary-reported row failure.
+    #[must_use]
+    pub fn new(kind: EvaluatorFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// Returns the transport-independent failure category.
+    #[must_use]
+    pub const fn kind(&self) -> EvaluatorFailureKind {
+        self.kind
+    }
+
+    /// Returns the peer-supplied diagnostic.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 /// Why one input row did not produce schema-valid outputs.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum RowFailure {
@@ -302,6 +357,10 @@ pub enum RowFailure {
     /// The model returned outputs that do not satisfy its schema.
     #[error("invalid model output: {0}")]
     InvalidOutput(#[source] OutputRowError),
+
+    /// A process or network adapter reported a typed boundary failure.
+    #[error(transparent)]
+    Evaluator(#[from] EvaluatorFailure),
 }
 
 /// The result of evaluating one input row.
@@ -367,12 +426,25 @@ impl ChunkResult {
 /// [`InProcessEvaluator`] preserves request order, while
 /// [`crate::ParallelInProcessEvaluator`] uses a channel to stream completion
 /// order without adding an async runtime to the core.
+///
+/// Per-row model failures remain inside [`ChunkResult`]. The iterator's
+/// [`Result`] is reserved for failures of the evaluator as a whole, such as a
+/// broken process or malformed wire message. Keeping those failure scopes
+/// distinct lets future drivers retry a stable [`EvaluationId`] without
+/// mistaking a transport outage for model behavior.
 pub trait Evaluator {
+    /// Failure raised by the evaluator shell rather than an individual row.
+    type Error: std::error::Error + Send + Sync + 'static;
+
     /// Returns the model's validated discovery schema.
     fn schema(&self) -> &ModelSchema;
 
-    /// Starts evaluating a batch and streams completed chunks.
-    fn evaluate(&self, requests: Vec<EvalRequest>) -> Box<dyn Iterator<Item = ChunkResult> + '_>;
+    /// Starts evaluating a batch and streams completed chunks or evaluator
+    /// failures.
+    fn evaluate(
+        &self,
+        requests: Vec<EvalRequest>,
+    ) -> Box<dyn Iterator<Item = Result<ChunkResult, Self::Error>> + '_>;
 }
 
 /// A single-threaded evaluator backed by a row-at-a-time Rust closure.
@@ -441,15 +513,20 @@ impl<F> Evaluator for InProcessEvaluator<F>
 where
     F: for<'data> Fn(InputRow<'data>, RowContext) -> Result<Vec<OutputValue>, ModelError>,
 {
+    type Error = Infallible;
+
     fn schema(&self) -> &ModelSchema {
         &self.schema
     }
 
-    fn evaluate(&self, requests: Vec<EvalRequest>) -> Box<dyn Iterator<Item = ChunkResult> + '_> {
+    fn evaluate(
+        &self,
+        requests: Vec<EvalRequest>,
+    ) -> Box<dyn Iterator<Item = Result<ChunkResult, Self::Error>> + '_> {
         Box::new(
             requests
                 .into_iter()
-                .map(|request| self.evaluate_request(request)),
+                .map(|request| Ok(self.evaluate_request(request))),
         )
     }
 }
@@ -634,7 +711,8 @@ mod tests {
         });
         let results = evaluator
             .evaluate(vec![request(10, vec![0, 1]), request(11, vec![2])])
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         assert_eq!(results[0].id(), EvaluationId::new(10));
         assert_eq!(results[1].id(), EvaluationId::new(11));
@@ -665,6 +743,7 @@ mod tests {
         let result = evaluator
             .evaluate(vec![request(10, vec![0, 1, 2])])
             .next()
+            .unwrap()
             .unwrap();
 
         assert!(matches!(result.rows()[0], RowOutcome::Success(_)));
@@ -689,6 +768,7 @@ mod tests {
         let result = evaluator
             .evaluate(vec![request(10, vec![0, 1, 2])])
             .next()
+            .unwrap()
             .unwrap();
 
         assert!(matches!(result.rows()[0], RowOutcome::Success(_)));
@@ -715,6 +795,7 @@ mod tests {
         let result = evaluator
             .evaluate(vec![EvalRequest::new(EvaluationId::new(12), 17, inputs)])
             .next()
+            .unwrap()
             .unwrap();
 
         assert!(matches!(
@@ -739,7 +820,11 @@ mod tests {
             }
         });
         let request = request(13, vec![0, 1]);
-        let result = evaluator.evaluate(vec![request.clone()]).next().unwrap();
+        let result = evaluator
+            .evaluate(vec![request.clone()])
+            .next()
+            .unwrap()
+            .unwrap();
 
         assert!(matches!(
             evaluation_to_dataset(&schema, request, result, output),
@@ -756,6 +841,7 @@ mod tests {
         let result = evaluator
             .evaluate(vec![request(10, vec![0])])
             .next()
+            .unwrap()
             .unwrap();
         assert!(matches!(
             result.rows(),

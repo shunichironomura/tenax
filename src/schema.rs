@@ -359,7 +359,9 @@ impl InputSchema {
     }
 
     /// Adds a unit annotation used by typed model bindings and interchange
-    /// adapters.
+    /// adapters. The input's numeric bounds and values are expressed in this
+    /// unit; adapters for unit-aware models must convert explicitly at their
+    /// boundary.
     ///
     /// # Errors
     ///

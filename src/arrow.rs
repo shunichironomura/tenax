@@ -1,13 +1,16 @@
-//! Apache Arrow schema and evaluation-request boundary conversions.
+//! Apache Arrow model-schema, request, and result boundary conversions.
 //!
 //! This module is available with the `arrow` crate feature. It keeps Arrow out
 //! of the algorithmic core while defining the column and metadata contract used
 //! by future process and network adapters.
 //!
 //! A model discovery [`ArrowSchema`] contains all inputs followed by all
-//! outputs. Evaluation-request [`RecordBatch`] values contain only input
-//! columns and carry one evaluation ID and request seed in schema metadata.
-//! Every field is non-nullable.
+//! outputs. Evaluation-request [`RecordBatch`] values contain input columns
+//! followed by fixed-size evaluation-ID and seed context columns. Result
+//! batches contain nullable output columns followed by evaluation-ID, outcome
+//! status, and failure-message columns. Keeping request-specific context in
+//! columns (rather than schema metadata) lets many batches share one standard
+//! Arrow IPC stream, which is required by the stdio and future HTTP bindings.
 //!
 //! | Tenax value | Arrow data type |
 //! | --- | --- |
@@ -16,9 +19,11 @@
 //! | Categorical input | `Dictionary<Int32, Utf8>` |
 //! | Boolean output | `Boolean` |
 //!
-//! Unknown metadata keys are ignored by Tenax readers, so the contract can gain
-//! optional annotations. Tenax-owned metadata is namespaced
-//! with `tenax.` and versioned by [`SCHEMA_VERSION_METADATA_KEY`].
+//! Unknown metadata keys are ignored by Tenax readers, so Graphcal and other
+//! model languages can retain richer type, unit, diagnostic, and provenance
+//! annotations. Unknown trailing result fields marked with the `extension`
+//! role are also ignored. Tenax-owned metadata is namespaced with `tenax.` and
+//! versioned by [`SCHEMA_VERSION_METADATA_KEY`].
 //!
 //! # Example
 //!
@@ -54,7 +59,8 @@ use std::sync::Arc;
 
 use arrow_array::types::Int32Type;
 use arrow_array::{
-    Array, ArrayRef, DictionaryArray, Float64Array, Int32Array, Int64Array, StringArray,
+    Array, ArrayRef, BooleanArray, DictionaryArray, FixedSizeBinaryArray, Float64Array, Int32Array,
+    Int64Array, StringArray, UInt8Array, UInt64Array,
 };
 use arrow_schema::{ArrowError as ArrowRsError, DataType, Field};
 use thiserror::Error;
@@ -64,7 +70,11 @@ pub use arrow_schema::Schema as ArrowSchema;
 
 use crate::DataError;
 use crate::data::{Feature, FeatureView};
-use crate::evaluation::{EvalRequest, EvaluationId};
+use crate::evaluation::{
+    ChunkResult, ChunkResultError, EvalRequest, EvaluationId, EvaluatorFailure,
+    EvaluatorFailureKind, ModelError, ModelPanic, OutputRow, OutputRowError, OutputValue,
+    RowFailure, RowOutcome,
+};
 use crate::input::{InputChunk, InputChunkError};
 use crate::schema::{
     FeatureDomain, InputSchema, ModelFieldRole, ModelSchema, OutputKind, OutputSchema, SchemaError,
@@ -73,13 +83,21 @@ use crate::schema::{
 /// Metadata key containing the Tenax Arrow contract version.
 pub const SCHEMA_VERSION_METADATA_KEY: &str = "tenax.schema.version";
 /// Current value of [`SCHEMA_VERSION_METADATA_KEY`].
-pub const SCHEMA_VERSION: &str = "1";
-/// Field metadata key identifying an input or output role.
+pub const SCHEMA_VERSION: &str = "2";
+/// Field metadata key identifying a model or protocol field role.
 pub const FIELD_ROLE_METADATA_KEY: &str = "tenax.field.role";
 /// Value of [`FIELD_ROLE_METADATA_KEY`] for a model input.
 pub const INPUT_FIELD_ROLE: &str = "input";
 /// Value of [`FIELD_ROLE_METADATA_KEY`] for a model output.
 pub const OUTPUT_FIELD_ROLE: &str = "output";
+/// Value of [`FIELD_ROLE_METADATA_KEY`] for request/result context.
+pub const CONTEXT_FIELD_ROLE: &str = "context";
+/// Value of [`FIELD_ROLE_METADATA_KEY`] for per-row result state.
+pub const OUTCOME_FIELD_ROLE: &str = "outcome";
+/// Value of [`FIELD_ROLE_METADATA_KEY`] for optional peer-specific result data.
+pub const EXTENSION_FIELD_ROLE: &str = "extension";
+/// Metadata key identifying a context, outcome, or extension field's purpose.
+pub const FIELD_KIND_METADATA_KEY: &str = "tenax.field.kind";
 /// Optional input-field metadata key containing a unit annotation.
 pub const FIELD_UNIT_METADATA_KEY: &str = "tenax.input.unit";
 /// Input-field metadata key containing a continuous or integer lower bound.
@@ -90,12 +108,69 @@ pub const INPUT_UPPER_BOUND_METADATA_KEY: &str = "tenax.input.upper";
 pub const INPUT_CATEGORIES_METADATA_KEY: &str = "tenax.input.categories";
 /// Schema metadata key identifying the semantic kind of one record batch.
 pub const BATCH_KIND_METADATA_KEY: &str = "tenax.batch.kind";
+/// Value of [`BATCH_KIND_METADATA_KEY`] for model-schema discovery.
+pub const MODEL_SCHEMA_BATCH_KIND: &str = "model_schema";
 /// Value of [`BATCH_KIND_METADATA_KEY`] for an evaluation request.
 pub const EVALUATION_REQUEST_BATCH_KIND: &str = "evaluation_request";
-/// Evaluation-request metadata key containing a canonical 32-digit hexadecimal ID.
-pub const EVALUATION_ID_METADATA_KEY: &str = "tenax.evaluation.id";
-/// Evaluation-request metadata key containing the decimal request seed.
-pub const EVALUATION_SEED_METADATA_KEY: &str = "tenax.evaluation.seed";
+/// Value of [`BATCH_KIND_METADATA_KEY`] for an evaluation result.
+pub const EVALUATION_RESULT_BATCH_KIND: &str = "evaluation_result";
+/// Canonical name of the fixed-size binary evaluation-ID context field.
+pub const EVALUATION_ID_FIELD_NAME: &str = "tenax.evaluation_id";
+/// [`FIELD_KIND_METADATA_KEY`] value for an evaluation-ID context field.
+pub const EVALUATION_ID_FIELD_KIND: &str = "evaluation_id";
+/// Canonical name of the unsigned request-seed context field.
+pub const EVALUATION_SEED_FIELD_NAME: &str = "tenax.evaluation_seed";
+/// [`FIELD_KIND_METADATA_KEY`] value for a request-seed context field.
+pub const EVALUATION_SEED_FIELD_KIND: &str = "evaluation_seed";
+/// Canonical name of the unsigned per-row outcome-status field.
+pub const OUTCOME_STATUS_FIELD_NAME: &str = "tenax.outcome_status";
+/// [`FIELD_KIND_METADATA_KEY`] value for an outcome-status field.
+pub const OUTCOME_STATUS_FIELD_KIND: &str = "outcome_status";
+/// Canonical name of the nullable per-row failure-message field.
+pub const FAILURE_MESSAGE_FIELD_NAME: &str = "tenax.failure_message";
+/// [`FIELD_KIND_METADATA_KEY`] value for a failure-message field.
+pub const FAILURE_MESSAGE_FIELD_KIND: &str = "failure_message";
+/// Byte width of the big-endian `u128` evaluation-ID representation.
+pub const EVALUATION_ID_BYTE_WIDTH: i32 = 16;
+/// Result status code for a schema-valid successful row.
+pub const OUTCOME_STATUS_SUCCESS: u8 = 0;
+/// Result status code for a model-returned row failure.
+pub const OUTCOME_STATUS_MODEL_ERROR: u8 = 1;
+/// Result status code for a panic carrying a string diagnostic.
+pub const OUTCOME_STATUS_PANIC: u8 = 2;
+/// Result status code for a non-string panic payload.
+pub const OUTCOME_STATUS_NON_STRING_PANIC: u8 = 3;
+/// Result status code for an input rejected by the peer.
+pub const OUTCOME_STATUS_INVALID_INPUT: u8 = 4;
+/// Result status code for output values rejected by the peer.
+pub const OUTCOME_STATUS_INVALID_OUTPUT: u8 = 5;
+
+/// Semantic role encoded on an Arrow field at the interchange boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArrowFieldRole {
+    /// A declared model input.
+    Input,
+    /// A declared model output.
+    Output,
+    /// Evaluation identity or reproducibility context.
+    Context,
+    /// Per-row success/failure state.
+    Outcome,
+    /// Optional peer-specific result data ignored by Tenax.
+    Extension,
+}
+
+impl std::fmt::Display for ArrowFieldRole {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Input => formatter.write_str(INPUT_FIELD_ROLE),
+            Self::Output => formatter.write_str(OUTPUT_FIELD_ROLE),
+            Self::Context => formatter.write_str(CONTEXT_FIELD_ROLE),
+            Self::Outcome => formatter.write_str(OUTCOME_FIELD_ROLE),
+            Self::Extension => formatter.write_str(EXTENSION_FIELD_ROLE),
+        }
+    }
+}
 
 /// Errors raised while converting between validated Tenax values and Arrow.
 #[derive(Debug, Error)]
@@ -125,7 +200,7 @@ pub enum ArrowConversionError {
         actual: String,
     },
 
-    /// A record batch has a semantic kind other than an evaluation request.
+    /// A schema or record batch has a different semantic kind.
     #[error("Arrow batch kind is '{actual}', but an '{expected}' batch is required")]
     UnexpectedBatchKind {
         /// Required batch kind.
@@ -141,6 +216,17 @@ pub enum ArrowConversionError {
         field: String,
         /// Rejected metadata value.
         value: String,
+    },
+
+    /// A known field role occurs where a different role is required.
+    #[error("Arrow field '{field}' has role '{actual}', but {expected} is required")]
+    UnexpectedFieldRole {
+        /// Affected field name.
+        field: String,
+        /// Required semantic role description.
+        expected: &'static str,
+        /// Parsed but misplaced role.
+        actual: ArrowFieldRole,
     },
 
     /// A required scalar metadata value cannot be parsed.
@@ -178,9 +264,16 @@ pub enum ArrowConversionError {
     },
 
     /// Arrow field nullability disagrees with Tenax's no-missing-values contract.
-    #[error("Arrow field '{field}' is nullable; Tenax fields must be non-nullable")]
+    #[error("Arrow field '{field}' is nullable; this Tenax field must be non-nullable")]
     NullableField {
         /// Nullable field name.
+        field: String,
+    },
+
+    /// A result output is non-nullable even though failed rows require nulls.
+    #[error("Arrow result output field '{field}' is non-nullable; result outputs must be nullable")]
+    NonNullableResultOutput {
+        /// Non-nullable result output name.
         field: String,
     },
 
@@ -195,12 +288,12 @@ pub enum ArrowConversionError {
         data_type: DataType,
     },
 
-    /// The number of request columns differs from the expected model inputs.
+    /// The number of request columns differs from inputs plus protocol context.
     #[error(
-        "Arrow evaluation request has {actual} fields, but the model schema requires {expected} inputs"
+        "Arrow evaluation request has {actual} fields, but {expected} input and context fields are required"
     )]
     RequestFieldCountMismatch {
-        /// Number of model inputs.
+        /// Number of required request fields.
         expected: usize,
         /// Number of Arrow fields.
         actual: usize,
@@ -215,6 +308,90 @@ pub enum ArrowConversionError {
         position: usize,
         /// Arrow field name.
         field: String,
+    },
+
+    /// A required context or outcome field differs from the protocol contract.
+    #[error(
+        "Arrow field {position} ('{field}') does not match required protocol field '{expected}'"
+    )]
+    ProtocolFieldMismatch {
+        /// Zero-based batch field position.
+        position: usize,
+        /// Supplied field name.
+        field: String,
+        /// Canonical protocol field name.
+        expected: &'static str,
+    },
+
+    /// A result has too few fields for its outputs and required protocol data.
+    #[error(
+        "Arrow evaluation result has {actual} fields, but at least {expected} output and protocol fields are required"
+    )]
+    ResultFieldCountMismatch {
+        /// Minimum number of required result fields.
+        expected: usize,
+        /// Number of supplied fields.
+        actual: usize,
+    },
+
+    /// A result output field differs from the corresponding model declaration.
+    #[error(
+        "Arrow result field {position} ('{field}') does not match the corresponding model output declaration"
+    )]
+    ResultOutputMismatch {
+        /// Zero-based model output position.
+        position: usize,
+        /// Supplied field name.
+        field: String,
+    },
+
+    /// A record batch cannot represent a non-empty Tenax request or result.
+    #[error("Arrow {kind} batch must contain at least one row")]
+    EmptyBatch {
+        /// Semantic batch kind.
+        kind: &'static str,
+    },
+
+    /// Evaluation-ID context changes within one request/result batch.
+    #[error("Arrow evaluation ID differs from the first row at row {row}")]
+    InconsistentEvaluationId {
+        /// First row with a different identifier.
+        row: usize,
+    },
+
+    /// Request-seed context changes within one request batch.
+    #[error("Arrow evaluation seed differs from the first row at row {row}")]
+    InconsistentEvaluationSeed {
+        /// First row with a different seed.
+        row: usize,
+    },
+
+    /// A result uses an outcome status code unknown to this schema version.
+    #[error("Arrow evaluation result has unknown outcome status {status} at row {row}")]
+    UnknownOutcomeStatus {
+        /// Affected row.
+        row: usize,
+        /// Rejected status code.
+        status: u8,
+    },
+
+    /// Success/failure state and output nulls disagree.
+    #[error("Arrow evaluation result row {row} has inconsistent outcome data: {message}")]
+    InconsistentOutcome {
+        /// Affected row.
+        row: usize,
+        /// Contract violation diagnostic.
+        message: &'static str,
+    },
+
+    /// A successful native output row disagrees with the supplied model schema.
+    #[error("evaluation result row {row} has invalid outputs: {source}")]
+    InvalidOutputRow {
+        /// Affected row.
+        row: usize,
+        /// Output schema violation.
+        #[source]
+        source: OutputRowError,
     },
 
     /// A supposedly non-nullable array contains null values.
@@ -273,19 +450,9 @@ pub enum ArrowConversionError {
         data_type: DataType,
     },
 
-    /// Evaluation ID metadata is not canonical hexadecimal `u128` data.
-    #[error("Arrow evaluation ID metadata '{value}' is not 32 lowercase hexadecimal digits")]
-    InvalidEvaluationId {
-        /// Rejected metadata value.
-        value: String,
-    },
-
-    /// Evaluation seed metadata is not decimal `u64` data.
-    #[error("Arrow evaluation seed metadata '{value}' is not a decimal u64")]
-    InvalidEvaluationSeed {
-        /// Rejected metadata value.
-        value: String,
-    },
+    /// Decoded result rows violate the non-empty chunk invariant.
+    #[error(transparent)]
+    ChunkResult(#[from] ChunkResultError),
 
     /// Arrow rejected a schema, array, or record-batch construction.
     #[error(transparent)]
@@ -336,6 +503,34 @@ impl<'data> EvalRequestRef<'data> {
     }
 }
 
+/// A borrowed native result chunk paired with its model schema for Arrow
+/// encoding.
+#[derive(Clone, Copy, Debug)]
+pub struct ChunkResultRef<'data> {
+    schema: &'data ModelSchema,
+    result: &'data ChunkResult,
+}
+
+impl<'data> ChunkResultRef<'data> {
+    /// Pairs a result with the model schema used to validate and encode it.
+    #[must_use]
+    pub const fn new(schema: &'data ModelSchema, result: &'data ChunkResult) -> Self {
+        Self { schema, result }
+    }
+
+    /// Returns the model schema used for conversion.
+    #[must_use]
+    pub const fn schema(&self) -> &'data ModelSchema {
+        self.schema
+    }
+
+    /// Returns the native result used for conversion.
+    #[must_use]
+    pub const fn result(&self) -> &'data ChunkResult {
+        self.result
+    }
+}
+
 impl TryFrom<&ModelSchema> for ArrowSchema {
     type Error = ArrowConversionError;
 
@@ -344,9 +539,17 @@ impl TryFrom<&ModelSchema> for ArrowSchema {
             .inputs()
             .iter()
             .map(input_field)
-            .chain(schema.outputs().iter().map(output_field).map(Ok))
+            .chain(
+                schema
+                    .outputs()
+                    .iter()
+                    .map(|output| Ok(output_field(output, false))),
+            )
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self::new_with_metadata(fields, version_metadata()))
+        Ok(Self::new_with_metadata(
+            fields,
+            batch_metadata(MODEL_SCHEMA_BATCH_KIND),
+        ))
     }
 }
 
@@ -363,13 +566,14 @@ impl TryFrom<&ArrowSchema> for ModelSchema {
 
     fn try_from(schema: &ArrowSchema) -> Result<Self, Self::Error> {
         validate_version(schema.metadata())?;
+        validate_batch_kind(schema.metadata(), MODEL_SCHEMA_BATCH_KIND)?;
 
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
         let mut saw_output = false;
         for field in schema.fields() {
             match field_role(field)? {
-                ModelFieldRole::Input => {
+                ArrowFieldRole::Input => {
                     if saw_output {
                         return Err(ArrowConversionError::InputAfterOutput {
                             field: field.name().clone(),
@@ -377,9 +581,16 @@ impl TryFrom<&ArrowSchema> for ModelSchema {
                     }
                     inputs.push(input_schema(field)?);
                 }
-                ModelFieldRole::Output => {
+                ArrowFieldRole::Output => {
                     saw_output = true;
-                    outputs.push(output_schema(field)?);
+                    outputs.push(output_schema(field, false)?);
+                }
+                actual => {
+                    return Err(ArrowConversionError::UnexpectedFieldRole {
+                        field: field.name().clone(),
+                        expected: "a model input or output role",
+                        actual,
+                    });
                 }
             }
         }
@@ -396,31 +607,157 @@ impl TryFrom<ArrowSchema> for ModelSchema {
     }
 }
 
+/// Builds the fixed Arrow schema shared by every request batch for `schema`.
+pub fn evaluation_request_schema(
+    schema: &ModelSchema,
+) -> Result<ArrowSchema, ArrowConversionError> {
+    let fields = schema
+        .inputs()
+        .iter()
+        .map(input_field)
+        .chain(
+            [evaluation_id_field(), evaluation_seed_field()]
+                .into_iter()
+                .map(Ok),
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ArrowSchema::new_with_metadata(
+        fields,
+        batch_metadata(EVALUATION_REQUEST_BATCH_KIND),
+    ))
+}
+
+/// Validates a request-stream schema without waiting for its first batch.
+pub fn validate_evaluation_request_schema(
+    schema: &ModelSchema,
+    arrow_schema: &ArrowSchema,
+) -> Result<(), ArrowConversionError> {
+    validate_version(arrow_schema.metadata())?;
+    validate_batch_kind(arrow_schema.metadata(), EVALUATION_REQUEST_BATCH_KIND)?;
+    let expected_count = schema.inputs().len() + 2;
+    if arrow_schema.fields().len() != expected_count {
+        return Err(ArrowConversionError::RequestFieldCountMismatch {
+            expected: expected_count,
+            actual: arrow_schema.fields().len(),
+        });
+    }
+    for (position, (expected, field)) in schema
+        .inputs()
+        .iter()
+        .zip(arrow_schema.fields())
+        .enumerate()
+    {
+        if field_role(field)? != ArrowFieldRole::Input || input_schema(field)? != *expected {
+            return Err(ArrowConversionError::RequestInputMismatch {
+                position,
+                field: field.name().clone(),
+            });
+        }
+    }
+    validate_protocol_field(
+        arrow_schema.field(schema.inputs().len()),
+        schema.inputs().len(),
+        ProtocolField::EvaluationId,
+    )?;
+    validate_protocol_field(
+        arrow_schema.field(schema.inputs().len() + 1),
+        schema.inputs().len() + 1,
+        ProtocolField::EvaluationSeed,
+    )
+}
+
+/// Builds the standard prefix schema for every result batch for `schema`.
+///
+/// A peer may append fields carrying the [`EXTENSION_FIELD_ROLE`]. Tenax
+/// ignores those fields while retaining the fixed output and outcome prefix.
+#[must_use]
+pub fn evaluation_result_schema(schema: &ModelSchema) -> ArrowSchema {
+    let fields = schema
+        .outputs()
+        .iter()
+        .map(|output| output_field(output, true))
+        .chain([
+            evaluation_id_field(),
+            outcome_status_field(),
+            failure_message_field(),
+        ])
+        .collect::<Vec<_>>();
+    ArrowSchema::new_with_metadata(fields, batch_metadata(EVALUATION_RESULT_BATCH_KIND))
+}
+
+/// Validates a result-stream schema, including optional extension fields.
+pub fn validate_evaluation_result_schema(
+    schema: &ModelSchema,
+    arrow_schema: &ArrowSchema,
+) -> Result<(), ArrowConversionError> {
+    validate_version(arrow_schema.metadata())?;
+    validate_batch_kind(arrow_schema.metadata(), EVALUATION_RESULT_BATCH_KIND)?;
+    let required_count = schema.outputs().len() + 3;
+    if arrow_schema.fields().len() < required_count {
+        return Err(ArrowConversionError::ResultFieldCountMismatch {
+            expected: required_count,
+            actual: arrow_schema.fields().len(),
+        });
+    }
+    for (position, (expected, field)) in schema
+        .outputs()
+        .iter()
+        .zip(arrow_schema.fields())
+        .enumerate()
+    {
+        if field_role(field)? != ArrowFieldRole::Output || output_schema(field, true)? != *expected
+        {
+            return Err(ArrowConversionError::ResultOutputMismatch {
+                position,
+                field: field.name().clone(),
+            });
+        }
+    }
+    let protocol_start = schema.outputs().len();
+    validate_protocol_field(
+        arrow_schema.field(protocol_start),
+        protocol_start,
+        ProtocolField::EvaluationId,
+    )?;
+    validate_protocol_field(
+        arrow_schema.field(protocol_start + 1),
+        protocol_start + 1,
+        ProtocolField::OutcomeStatus,
+    )?;
+    validate_protocol_field(
+        arrow_schema.field(protocol_start + 2),
+        protocol_start + 2,
+        ProtocolField::FailureMessage,
+    )?;
+    for field in arrow_schema.fields().iter().skip(required_count) {
+        let actual = field_role(field)?;
+        if actual != ArrowFieldRole::Extension {
+            return Err(ArrowConversionError::UnexpectedFieldRole {
+                field: field.name().clone(),
+                expected: "an extension role after the result protocol fields",
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
 impl TryFrom<EvalRequestRef<'_>> for RecordBatch {
     type Error = ArrowConversionError;
 
     fn try_from(value: EvalRequestRef<'_>) -> Result<Self, Self::Error> {
         let EvalRequestRef { schema, request } = value;
         request.inputs().validate_against(schema)?;
-
-        let fields = schema
-            .inputs()
-            .iter()
-            .map(input_field)
-            .collect::<Result<Vec<_>, _>>()?;
-        let columns = schema
+        let row_count = request.inputs().row_count();
+        let mut columns = schema
             .inputs()
             .iter()
             .zip(request.inputs().feature_views())
             .map(|(input, values)| input_array(input, values))
             .collect::<Result<Vec<_>, _>>()?;
-
-        let metadata = request_metadata(request);
-        Self::try_new(
-            Arc::new(ArrowSchema::new_with_metadata(fields, metadata)),
-            columns,
-        )
-        .map_err(Into::into)
+        columns.push(evaluation_id_array(request.id(), row_count)?);
+        columns.push(Arc::new(UInt64Array::from(vec![request.seed(); row_count])));
+        Self::try_new(Arc::new(evaluation_request_schema(schema)?), columns).map_err(Into::into)
     }
 }
 
@@ -429,42 +766,88 @@ impl TryFrom<(&ModelSchema, &RecordBatch)> for EvalRequest {
 
     fn try_from((schema, batch): (&ModelSchema, &RecordBatch)) -> Result<Self, Self::Error> {
         let arrow_schema = batch.schema_ref();
-        validate_version(arrow_schema.metadata())?;
-        validate_batch_kind(arrow_schema.metadata())?;
-
-        if arrow_schema.fields().len() != schema.inputs().len() {
-            return Err(ArrowConversionError::RequestFieldCountMismatch {
-                expected: schema.inputs().len(),
-                actual: arrow_schema.fields().len(),
+        validate_evaluation_request_schema(schema, arrow_schema)?;
+        if batch.num_rows() == 0 {
+            return Err(ArrowConversionError::EmptyBatch {
+                kind: EVALUATION_REQUEST_BATCH_KIND,
             });
         }
-        let id = evaluation_id(arrow_schema.metadata())?;
-        let seed = evaluation_seed(arrow_schema.metadata())?;
 
+        let context_start = schema.inputs().len();
+        let id = evaluation_id_from_array(
+            arrow_schema.field(context_start),
+            batch.column(context_start),
+        )?;
+        let seed = evaluation_seed_from_array(
+            arrow_schema.field(context_start + 1),
+            batch.column(context_start + 1),
+        )?;
         let features = schema
             .inputs()
             .iter()
             .zip(arrow_schema.fields())
             .zip(batch.columns())
-            .enumerate()
-            .map(|(position, ((expected, field), array))| {
-                let role = field_role(field)?;
-                if role != ModelFieldRole::Input || input_schema(field)? != *expected {
-                    return Err(ArrowConversionError::RequestInputMismatch {
-                        position,
-                        field: field.name().clone(),
-                    });
-                }
-                feature_from_array(expected, field, array)
-            })
+            .map(|((expected, field), array)| feature_from_array(expected, field, array))
             .collect::<Result<Vec<_>, _>>()?;
-
         let inputs = InputChunk::new(schema, features)?;
         Ok(Self::new(id, seed, inputs))
     }
 }
 
 impl TryFrom<(&ModelSchema, RecordBatch)> for EvalRequest {
+    type Error = ArrowConversionError;
+
+    fn try_from((schema, batch): (&ModelSchema, RecordBatch)) -> Result<Self, Self::Error> {
+        Self::try_from((schema, &batch))
+    }
+}
+
+impl TryFrom<ChunkResultRef<'_>> for RecordBatch {
+    type Error = ArrowConversionError;
+
+    fn try_from(value: ChunkResultRef<'_>) -> Result<Self, Self::Error> {
+        let ChunkResultRef { schema, result } = value;
+        for (row, outcome) in result.rows().iter().enumerate() {
+            if let RowOutcome::Success(outputs) = outcome {
+                outputs
+                    .validate_against(schema)
+                    .map_err(|source| ArrowConversionError::InvalidOutputRow { row, source })?;
+            }
+        }
+
+        let mut columns = (0..schema.outputs().len())
+            .map(|position| result_output_array(result, position))
+            .collect::<Vec<_>>();
+        columns.push(evaluation_id_array(result.id(), result.rows().len())?);
+        let (statuses, messages): (Vec<_>, Vec<_>) = result.rows().iter().map(wire_outcome).unzip();
+        columns.push(Arc::new(UInt8Array::from(statuses)));
+        columns.push(Arc::new(StringArray::from(messages)));
+        Self::try_new(Arc::new(evaluation_result_schema(schema)), columns).map_err(Into::into)
+    }
+}
+
+impl TryFrom<(&ModelSchema, &RecordBatch)> for ChunkResult {
+    type Error = ArrowConversionError;
+
+    fn try_from((schema, batch): (&ModelSchema, &RecordBatch)) -> Result<Self, Self::Error> {
+        let arrow_schema = batch.schema_ref();
+        validate_evaluation_result_schema(schema, arrow_schema)?;
+        if batch.num_rows() == 0 {
+            return Err(ArrowConversionError::EmptyBatch {
+                kind: EVALUATION_RESULT_BATCH_KIND,
+            });
+        }
+        let protocol_start = schema.outputs().len();
+        let id = evaluation_id_from_array(
+            arrow_schema.field(protocol_start),
+            batch.column(protocol_start),
+        )?;
+        let rows = result_rows(schema, batch)?;
+        Self::new(id, rows).map_err(Into::into)
+    }
+}
+
+impl TryFrom<(&ModelSchema, RecordBatch)> for ChunkResult {
     type Error = ArrowConversionError;
 
     fn try_from((schema, batch): (&ModelSchema, RecordBatch)) -> Result<Self, Self::Error> {
@@ -517,14 +900,110 @@ fn input_field(input: &InputSchema) -> Result<Field, ArrowConversionError> {
     Ok(Field::new(input.name(), data_type, false).with_metadata(metadata))
 }
 
-fn output_field(output: &OutputSchema) -> Field {
+fn output_field(output: &OutputSchema, nullable: bool) -> Field {
     let data_type = match output.kind() {
         OutputKind::Boolean => DataType::Boolean,
     };
-    Field::new(output.name(), data_type, false).with_metadata(HashMap::from([(
+    Field::new(output.name(), data_type, nullable).with_metadata(HashMap::from([(
         FIELD_ROLE_METADATA_KEY.to_owned(),
         OUTPUT_FIELD_ROLE.to_owned(),
     )]))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProtocolField {
+    EvaluationId,
+    EvaluationSeed,
+    OutcomeStatus,
+    FailureMessage,
+}
+
+impl ProtocolField {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::EvaluationId => EVALUATION_ID_FIELD_NAME,
+            Self::EvaluationSeed => EVALUATION_SEED_FIELD_NAME,
+            Self::OutcomeStatus => OUTCOME_STATUS_FIELD_NAME,
+            Self::FailureMessage => FAILURE_MESSAGE_FIELD_NAME,
+        }
+    }
+
+    const fn role(self) -> &'static str {
+        match self {
+            Self::EvaluationId | Self::EvaluationSeed => CONTEXT_FIELD_ROLE,
+            Self::OutcomeStatus | Self::FailureMessage => OUTCOME_FIELD_ROLE,
+        }
+    }
+
+    const fn kind(self) -> &'static str {
+        match self {
+            Self::EvaluationId => EVALUATION_ID_FIELD_KIND,
+            Self::EvaluationSeed => EVALUATION_SEED_FIELD_KIND,
+            Self::OutcomeStatus => OUTCOME_STATUS_FIELD_KIND,
+            Self::FailureMessage => FAILURE_MESSAGE_FIELD_KIND,
+        }
+    }
+
+    const fn nullable(self) -> bool {
+        matches!(self, Self::FailureMessage)
+    }
+
+    const fn data_type(self) -> DataType {
+        match self {
+            Self::EvaluationId => DataType::FixedSizeBinary(EVALUATION_ID_BYTE_WIDTH),
+            Self::EvaluationSeed => DataType::UInt64,
+            Self::OutcomeStatus => DataType::UInt8,
+            Self::FailureMessage => DataType::Utf8,
+        }
+    }
+
+    fn arrow_field(self) -> Field {
+        Field::new(self.name(), self.data_type(), self.nullable()).with_metadata(HashMap::from([
+            (FIELD_ROLE_METADATA_KEY.to_owned(), self.role().to_owned()),
+            (FIELD_KIND_METADATA_KEY.to_owned(), self.kind().to_owned()),
+        ]))
+    }
+}
+
+fn evaluation_id_field() -> Field {
+    ProtocolField::EvaluationId.arrow_field()
+}
+
+fn evaluation_seed_field() -> Field {
+    ProtocolField::EvaluationSeed.arrow_field()
+}
+
+fn outcome_status_field() -> Field {
+    ProtocolField::OutcomeStatus.arrow_field()
+}
+
+fn failure_message_field() -> Field {
+    ProtocolField::FailureMessage.arrow_field()
+}
+
+fn validate_protocol_field(
+    actual: &Field,
+    position: usize,
+    protocol_field: ProtocolField,
+) -> Result<(), ArrowConversionError> {
+    let expected = protocol_field.arrow_field();
+    let role_matches = field_role(actual)? == field_role(&expected)?;
+    let kind_matches = required_field_metadata(actual, FIELD_KIND_METADATA_KEY)?
+        == required_field_metadata(&expected, FIELD_KIND_METADATA_KEY)?;
+    if actual.name() == expected.name()
+        && actual.data_type() == expected.data_type()
+        && actual.is_nullable() == expected.is_nullable()
+        && role_matches
+        && kind_matches
+    {
+        Ok(())
+    } else {
+        Err(ArrowConversionError::ProtocolFieldMismatch {
+            position,
+            field: actual.name().clone(),
+            expected: protocol_field.name(),
+        })
+    }
 }
 
 fn input_schema(field: &Field) -> Result<InputSchema, ArrowConversionError> {
@@ -567,8 +1046,16 @@ fn input_schema(field: &Field) -> Result<InputSchema, ArrowConversionError> {
     }
 }
 
-fn output_schema(field: &Field) -> Result<OutputSchema, ArrowConversionError> {
-    validate_non_nullable(field)?;
+fn output_schema(field: &Field, result_output: bool) -> Result<OutputSchema, ArrowConversionError> {
+    if result_output {
+        if !field.is_nullable() {
+            return Err(ArrowConversionError::NonNullableResultOutput {
+                field: field.name().clone(),
+            });
+        }
+    } else {
+        validate_non_nullable(field)?;
+    }
     match field.data_type() {
         DataType::Boolean => OutputSchema::boolean(field.name()).map_err(Into::into),
         data_type => Err(ArrowConversionError::UnsupportedFieldType {
@@ -705,10 +1192,215 @@ fn categorical_feature(
         .map_err(Into::into)
 }
 
-fn field_role(field: &Field) -> Result<ModelFieldRole, ArrowConversionError> {
+fn evaluation_id_array(
+    id: EvaluationId,
+    row_count: usize,
+) -> Result<ArrayRef, ArrowConversionError> {
+    let bytes = id.get().to_be_bytes();
+    let array = FixedSizeBinaryArray::try_from_iter((0..row_count).map(|_| bytes))?;
+    Ok(Arc::new(array))
+}
+
+fn evaluation_id_from_array(
+    field: &Field,
+    array: &ArrayRef,
+) -> Result<EvaluationId, ArrowConversionError> {
+    reject_nulls(field, array.as_ref())?;
+    let values = array
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .ok_or_else(|| invalid_array(field))?;
+    let first_bytes: [u8; EVALUATION_ID_BYTE_WIDTH as usize] = values
+        .value(0)
+        .try_into()
+        .map_err(|_| invalid_array(field))?;
+    let first = EvaluationId::new(u128::from_be_bytes(first_bytes));
+    if let Some(row) = (1..values.len()).find(|row| values.value(*row) != first_bytes) {
+        return Err(ArrowConversionError::InconsistentEvaluationId { row });
+    }
+    Ok(first)
+}
+
+fn evaluation_seed_from_array(
+    field: &Field,
+    array: &ArrayRef,
+) -> Result<u64, ArrowConversionError> {
+    reject_nulls(field, array.as_ref())?;
+    let values = array
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| invalid_array(field))?;
+    let first = values.value(0);
+    if let Some(row) = values.values().iter().position(|value| *value != first) {
+        return Err(ArrowConversionError::InconsistentEvaluationSeed { row });
+    }
+    Ok(first)
+}
+
+fn result_output_array(result: &ChunkResult, position: usize) -> ArrayRef {
+    let values = result
+        .rows()
+        .iter()
+        .map(|outcome| match outcome {
+            RowOutcome::Success(outputs) => match outputs.values()[position] {
+                OutputValue::Boolean(value) => Some(value),
+            },
+            RowOutcome::Failure(_) => None,
+        })
+        .collect::<Vec<_>>();
+    Arc::new(BooleanArray::from(values))
+}
+
+fn wire_outcome(outcome: &RowOutcome) -> (u8, Option<String>) {
+    match outcome {
+        RowOutcome::Success(_) => (OUTCOME_STATUS_SUCCESS, None),
+        RowOutcome::Failure(RowFailure::Model(error)) => {
+            (OUTCOME_STATUS_MODEL_ERROR, Some(error.message().to_owned()))
+        }
+        RowOutcome::Failure(RowFailure::Panic(ModelPanic::Message(message))) => {
+            (OUTCOME_STATUS_PANIC, Some(message.clone()))
+        }
+        RowOutcome::Failure(RowFailure::Panic(ModelPanic::NonStringPayload)) => {
+            (OUTCOME_STATUS_NON_STRING_PANIC, None)
+        }
+        RowOutcome::Failure(RowFailure::InvalidInput(error)) => {
+            (OUTCOME_STATUS_INVALID_INPUT, Some(error.to_string()))
+        }
+        RowOutcome::Failure(RowFailure::InvalidOutput(error)) => {
+            (OUTCOME_STATUS_INVALID_OUTPUT, Some(error.to_string()))
+        }
+        RowOutcome::Failure(RowFailure::Evaluator(error)) => match error.kind() {
+            EvaluatorFailureKind::InvalidInput => (
+                OUTCOME_STATUS_INVALID_INPUT,
+                Some(error.message().to_owned()),
+            ),
+            EvaluatorFailureKind::InvalidOutput => (
+                OUTCOME_STATUS_INVALID_OUTPUT,
+                Some(error.message().to_owned()),
+            ),
+        },
+    }
+}
+
+fn result_rows(
+    schema: &ModelSchema,
+    batch: &RecordBatch,
+) -> Result<Vec<RowOutcome>, ArrowConversionError> {
+    let arrow_schema = batch.schema();
+    let output_arrays = schema
+        .outputs()
+        .iter()
+        .enumerate()
+        .map(|(position, _)| {
+            batch
+                .column(position)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| invalid_array(arrow_schema.field(position)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let protocol_start = schema.outputs().len();
+    let status_field = arrow_schema.field(protocol_start + 1);
+    let statuses = batch
+        .column(protocol_start + 1)
+        .as_any()
+        .downcast_ref::<UInt8Array>()
+        .ok_or_else(|| invalid_array(status_field))?;
+    reject_nulls(status_field, statuses)?;
+    let message_field = arrow_schema.field(protocol_start + 2);
+    let messages = batch
+        .column(protocol_start + 2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| invalid_array(message_field))?;
+
+    (0..batch.num_rows())
+        .map(|row| {
+            let status = statuses.value(row);
+            if status == OUTCOME_STATUS_SUCCESS {
+                if messages.is_valid(row) {
+                    return Err(ArrowConversionError::InconsistentOutcome {
+                        row,
+                        message: "a successful row must not carry a failure message",
+                    });
+                }
+                let values = output_arrays
+                    .iter()
+                    .map(|array| {
+                        if array.is_null(row) {
+                            Err(ArrowConversionError::InconsistentOutcome {
+                                row,
+                                message: "a successful row must contain every declared output",
+                            })
+                        } else {
+                            Ok(OutputValue::Boolean(array.value(row)))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let outputs = OutputRow::new(schema, values)
+                    .map_err(|source| ArrowConversionError::InvalidOutputRow { row, source })?;
+                return Ok(RowOutcome::Success(outputs));
+            }
+
+            if output_arrays.iter().any(|array| array.is_valid(row)) {
+                return Err(ArrowConversionError::InconsistentOutcome {
+                    row,
+                    message: "a failed row must represent every model output as null",
+                });
+            }
+            let message = messages
+                .is_valid(row)
+                .then(|| messages.value(row).to_owned());
+            let failure = match status {
+                OUTCOME_STATUS_MODEL_ERROR => {
+                    RowFailure::Model(ModelError::new(required_failure_message(row, message)?))
+                }
+                OUTCOME_STATUS_PANIC => {
+                    RowFailure::Panic(ModelPanic::Message(required_failure_message(row, message)?))
+                }
+                OUTCOME_STATUS_NON_STRING_PANIC => {
+                    if message.is_some() {
+                        return Err(ArrowConversionError::InconsistentOutcome {
+                            row,
+                            message: "a non-string panic must not carry a string message",
+                        });
+                    }
+                    RowFailure::Panic(ModelPanic::NonStringPayload)
+                }
+                OUTCOME_STATUS_INVALID_INPUT => RowFailure::Evaluator(EvaluatorFailure::new(
+                    EvaluatorFailureKind::InvalidInput,
+                    required_failure_message(row, message)?,
+                )),
+                OUTCOME_STATUS_INVALID_OUTPUT => RowFailure::Evaluator(EvaluatorFailure::new(
+                    EvaluatorFailureKind::InvalidOutput,
+                    required_failure_message(row, message)?,
+                )),
+                status => {
+                    return Err(ArrowConversionError::UnknownOutcomeStatus { row, status });
+                }
+            };
+            Ok(RowOutcome::Failure(failure))
+        })
+        .collect()
+}
+
+fn required_failure_message(
+    row: usize,
+    message: Option<String>,
+) -> Result<String, ArrowConversionError> {
+    message.ok_or(ArrowConversionError::InconsistentOutcome {
+        row,
+        message: "this failed-row status requires a failure message",
+    })
+}
+
+fn field_role(field: &Field) -> Result<ArrowFieldRole, ArrowConversionError> {
     match required_field_metadata(field, FIELD_ROLE_METADATA_KEY)? {
-        INPUT_FIELD_ROLE => Ok(ModelFieldRole::Input),
-        OUTPUT_FIELD_ROLE => Ok(ModelFieldRole::Output),
+        INPUT_FIELD_ROLE => Ok(ArrowFieldRole::Input),
+        OUTPUT_FIELD_ROLE => Ok(ArrowFieldRole::Output),
+        CONTEXT_FIELD_ROLE => Ok(ArrowFieldRole::Context),
+        OUTCOME_FIELD_ROLE => Ok(ArrowFieldRole::Outcome),
+        EXTENSION_FIELD_ROLE => Ok(ArrowFieldRole::Extension),
         value => Err(ArrowConversionError::InvalidFieldRole {
             field: field.name().clone(),
             value: value.to_owned(),
@@ -771,13 +1463,16 @@ fn validate_version(metadata: &HashMap<String, String>) -> Result<(), ArrowConve
     }
 }
 
-fn validate_batch_kind(metadata: &HashMap<String, String>) -> Result<(), ArrowConversionError> {
+fn validate_batch_kind(
+    metadata: &HashMap<String, String>,
+    expected: &'static str,
+) -> Result<(), ArrowConversionError> {
     let actual = required_schema_metadata(metadata, BATCH_KIND_METADATA_KEY)?;
-    if actual == EVALUATION_REQUEST_BATCH_KIND {
+    if actual == expected {
         Ok(())
     } else {
         Err(ArrowConversionError::UnexpectedBatchKind {
-            expected: EVALUATION_REQUEST_BATCH_KIND,
+            expected,
             actual: actual.to_owned(),
         })
     }
@@ -805,58 +1500,13 @@ fn reject_nulls(field: &Field, array: &dyn Array) -> Result<(), ArrowConversionE
     }
 }
 
-fn evaluation_id(metadata: &HashMap<String, String>) -> Result<EvaluationId, ArrowConversionError> {
-    let value = required_schema_metadata(metadata, EVALUATION_ID_METADATA_KEY)?;
-    let canonical = value.len() == 32
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-    if !canonical {
-        return Err(ArrowConversionError::InvalidEvaluationId {
-            value: value.to_owned(),
-        });
-    }
-    u128::from_str_radix(value, 16)
-        .map(EvaluationId::new)
-        .map_err(|_| ArrowConversionError::InvalidEvaluationId {
-            value: value.to_owned(),
-        })
-}
-
-fn evaluation_seed(metadata: &HashMap<String, String>) -> Result<u64, ArrowConversionError> {
-    let value = required_schema_metadata(metadata, EVALUATION_SEED_METADATA_KEY)?;
-    value
-        .parse()
-        .map_err(|_| ArrowConversionError::InvalidEvaluationSeed {
-            value: value.to_owned(),
-        })
-}
-
-fn version_metadata() -> HashMap<String, String> {
-    HashMap::from([(
-        SCHEMA_VERSION_METADATA_KEY.to_owned(),
-        SCHEMA_VERSION.to_owned(),
-    )])
-}
-
-fn request_metadata(request: &EvalRequest) -> HashMap<String, String> {
+fn batch_metadata(kind: &'static str) -> HashMap<String, String> {
     HashMap::from([
         (
             SCHEMA_VERSION_METADATA_KEY.to_owned(),
             SCHEMA_VERSION.to_owned(),
         ),
-        (
-            BATCH_KIND_METADATA_KEY.to_owned(),
-            EVALUATION_REQUEST_BATCH_KIND.to_owned(),
-        ),
-        (
-            EVALUATION_ID_METADATA_KEY.to_owned(),
-            request.id().to_string(),
-        ),
-        (
-            EVALUATION_SEED_METADATA_KEY.to_owned(),
-            request.seed().to_string(),
-        ),
+        (BATCH_KIND_METADATA_KEY.to_owned(), kind.to_owned()),
     ])
 }
 
@@ -952,15 +1602,26 @@ mod tests {
         let arrow = RecordBatch::try_from(EvalRequestRef::new(&schema, &native)).unwrap();
 
         assert_eq!(arrow.num_rows(), 2);
-        assert_eq!(arrow.num_columns(), 3);
+        assert_eq!(arrow.num_columns(), 5);
         assert_eq!(
-            arrow.schema().metadata().get(EVALUATION_ID_METADATA_KEY),
-            Some(&native.id().to_string())
+            arrow.schema().metadata().get(BATCH_KIND_METADATA_KEY),
+            Some(&EVALUATION_REQUEST_BATCH_KIND.to_owned())
         );
-        assert_eq!(
-            arrow.schema().metadata().get(EVALUATION_SEED_METADATA_KEY),
-            Some(&native.seed().to_string())
+        let ids = arrow
+            .column(3)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        assert!(
+            ids.iter()
+                .all(|value| value == Some(native.id().get().to_be_bytes().as_slice()))
         );
+        let seeds = arrow
+            .column(4)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert!(seeds.values().iter().all(|seed| *seed == native.seed()));
         let dictionary = arrow
             .column(2)
             .as_any()
@@ -1004,6 +1665,8 @@ mod tests {
                 original.column(0).clone(),
                 original.column(1).clone(),
                 Arc::new(reordered),
+                original.column(3).clone(),
+                original.column(4).clone(),
             ],
         )
         .unwrap();
@@ -1028,6 +1691,8 @@ mod tests {
                 original.column(0).clone(),
                 original.column(1).clone(),
                 Arc::new(dictionary),
+                original.column(3).clone(),
+                original.column(4).clone(),
             ],
         )
         .unwrap();
@@ -1119,22 +1784,20 @@ mod tests {
             vec![OutputSchema::boolean("failure").unwrap()],
         )
         .unwrap();
-        let field = input_field(&schema.inputs()[0]).unwrap();
-        let metadata = HashMap::from([
-            (
-                SCHEMA_VERSION_METADATA_KEY.to_owned(),
-                SCHEMA_VERSION.to_owned(),
-            ),
-            (
-                BATCH_KIND_METADATA_KEY.to_owned(),
-                EVALUATION_REQUEST_BATCH_KIND.to_owned(),
-            ),
-            (EVALUATION_ID_METADATA_KEY.to_owned(), format!("{:032x}", 1)),
-            (EVALUATION_SEED_METADATA_KEY.to_owned(), "2".to_owned()),
-        ]);
+        let inputs = InputChunk::new(
+            &schema,
+            vec![Feature::continuous("x", vec![0.25, 0.75]).unwrap()],
+        )
+        .unwrap();
+        let request = EvalRequest::new(EvaluationId::new(1), 2, inputs);
+        let original = RecordBatch::try_from(EvalRequestRef::new(&schema, &request)).unwrap();
         let batch = RecordBatch::try_new(
-            Arc::new(ArrowSchema::new_with_metadata(vec![field], metadata)),
-            vec![Arc::new(Float64Array::from(vec![0.5, f64::NAN]))],
+            original.schema(),
+            vec![
+                Arc::new(Float64Array::from(vec![0.5, f64::NAN])),
+                original.column(1).clone(),
+                original.column(2).clone(),
+            ],
         )
         .unwrap();
 
@@ -1148,34 +1811,207 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_request_metadata_before_copying_columns() {
+    fn rejects_missing_request_kind_before_copying_columns() {
         let schema = mixed_schema();
         let request = mixed_request(&schema);
         let mut batch = RecordBatch::try_from(EvalRequestRef::new(&schema, &request)).unwrap();
-        batch
-            .schema_metadata_mut()
-            .remove(EVALUATION_SEED_METADATA_KEY);
+        batch.schema_metadata_mut().remove(BATCH_KIND_METADATA_KEY);
 
         assert!(matches!(
             EvalRequest::try_from((&schema, &batch)),
             Err(ArrowConversionError::MissingSchemaMetadata {
-                key: EVALUATION_SEED_METADATA_KEY
+                key: BATCH_KIND_METADATA_KEY
             })
         ));
     }
 
     #[test]
-    fn rejects_noncanonical_evaluation_id_metadata() {
+    fn rejects_evaluation_ids_that_change_within_a_batch() {
         let schema = mixed_schema();
         let request = mixed_request(&schema);
-        let mut batch = RecordBatch::try_from(EvalRequestRef::new(&schema, &request)).unwrap();
-        batch
-            .schema_metadata_mut()
-            .insert(EVALUATION_ID_METADATA_KEY.to_owned(), "ABC".to_owned());
+        let original = RecordBatch::try_from(EvalRequestRef::new(&schema, &request)).unwrap();
+        let ids = FixedSizeBinaryArray::try_from_iter(
+            [EvaluationId::new(1), EvaluationId::new(2)]
+                .into_iter()
+                .map(|id| id.get().to_be_bytes()),
+        )
+        .unwrap();
+        let batch = RecordBatch::try_new(
+            original.schema(),
+            vec![
+                original.column(0).clone(),
+                original.column(1).clone(),
+                original.column(2).clone(),
+                Arc::new(ids),
+                original.column(4).clone(),
+            ],
+        )
+        .unwrap();
 
         assert!(matches!(
             EvalRequest::try_from((&schema, &batch)),
-            Err(ArrowConversionError::InvalidEvaluationId { value }) if value == "ABC"
+            Err(ArrowConversionError::InconsistentEvaluationId { row: 1 })
+        ));
+    }
+
+    #[test]
+    fn request_reader_rejects_seeds_that_change_within_a_batch() {
+        let schema = mixed_schema();
+        let request = mixed_request(&schema);
+        let original = RecordBatch::try_from(EvalRequestRef::new(&schema, &request)).unwrap();
+        let inconsistent = RecordBatch::try_new(
+            original.schema(),
+            vec![
+                original.column(0).clone(),
+                original.column(1).clone(),
+                original.column(2).clone(),
+                original.column(3).clone(),
+                Arc::new(UInt64Array::from(vec![1, 2])),
+            ],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            EvalRequest::try_from((&schema, &inconsistent)),
+            Err(ArrowConversionError::InconsistentEvaluationSeed { row: 1 })
+        ));
+    }
+
+    #[test]
+    fn request_schema_is_stable_across_ids_and_seeds() {
+        let schema = mixed_schema();
+        let first = mixed_request(&schema);
+        let second = EvalRequest::new(EvaluationId::new(99), 123, first.inputs().clone());
+        let first = RecordBatch::try_from(EvalRequestRef::new(&schema, &first)).unwrap();
+        let second = RecordBatch::try_from(EvalRequestRef::new(&schema, &second)).unwrap();
+        assert_eq!(first.schema(), second.schema());
+    }
+
+    #[test]
+    fn evaluation_result_round_trip_preserves_successes_and_failure_categories() {
+        let schema = mixed_schema();
+        let result = ChunkResult::new(
+            EvaluationId::new(7),
+            vec![
+                RowOutcome::Success(
+                    OutputRow::new(&schema, vec![OutputValue::Boolean(true)]).unwrap(),
+                ),
+                RowOutcome::Failure(RowFailure::Model(ModelError::new("domain failure"))),
+                RowOutcome::Failure(RowFailure::Panic(ModelPanic::Message(
+                    "panic detail".to_owned(),
+                ))),
+                RowOutcome::Failure(RowFailure::Panic(ModelPanic::NonStringPayload)),
+                RowOutcome::Failure(RowFailure::Evaluator(EvaluatorFailure::new(
+                    EvaluatorFailureKind::InvalidOutput,
+                    "wrong type",
+                ))),
+            ],
+        )
+        .unwrap();
+
+        let arrow = RecordBatch::try_from(ChunkResultRef::new(&schema, &result)).unwrap();
+        assert_eq!(arrow.num_columns(), 4);
+        assert!(arrow.schema().field(0).is_nullable());
+        assert_eq!(
+            arrow.schema().metadata().get(BATCH_KIND_METADATA_KEY),
+            Some(&EVALUATION_RESULT_BATCH_KIND.to_owned())
+        );
+        assert_eq!(ChunkResult::try_from((&schema, &arrow)).unwrap(), result);
+    }
+
+    #[test]
+    fn result_reader_accepts_trailing_extension_fields() {
+        let schema = mixed_schema();
+        let result = ChunkResult::new(
+            EvaluationId::new(8),
+            vec![RowOutcome::Success(
+                OutputRow::new(&schema, vec![OutputValue::Boolean(false)]).unwrap(),
+            )],
+        )
+        .unwrap();
+        let original = RecordBatch::try_from(ChunkResultRef::new(&schema, &result)).unwrap();
+        let extension = Field::new("graphcal.assertion_count", DataType::Int64, false)
+            .with_metadata(HashMap::from([(
+                FIELD_ROLE_METADATA_KEY.to_owned(),
+                EXTENSION_FIELD_ROLE.to_owned(),
+            )]));
+        let mut fields = original
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields.push(extension);
+        let mut columns = original.columns().to_vec();
+        columns.push(Arc::new(Int64Array::from(vec![0])));
+        let extended = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new_with_metadata(
+                fields,
+                original.schema().metadata().clone(),
+            )),
+            columns,
+        )
+        .unwrap();
+
+        assert_eq!(ChunkResult::try_from((&schema, &extended)).unwrap(), result);
+    }
+
+    #[test]
+    fn result_reader_rejects_unknown_status_codes() {
+        let schema = mixed_schema();
+        let result = ChunkResult::new(
+            EvaluationId::new(9),
+            vec![RowOutcome::Failure(RowFailure::Model(ModelError::new(
+                "failed",
+            )))],
+        )
+        .unwrap();
+        let original = RecordBatch::try_from(ChunkResultRef::new(&schema, &result)).unwrap();
+        let unknown = RecordBatch::try_new(
+            original.schema(),
+            vec![
+                original.column(0).clone(),
+                original.column(1).clone(),
+                Arc::new(UInt8Array::from(vec![255])),
+                original.column(3).clone(),
+            ],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ChunkResult::try_from((&schema, &unknown)),
+            Err(ArrowConversionError::UnknownOutcomeStatus {
+                row: 0,
+                status: 255
+            })
+        ));
+    }
+
+    #[test]
+    fn result_reader_rejects_outputs_on_failed_rows() {
+        let schema = mixed_schema();
+        let result = ChunkResult::new(
+            EvaluationId::new(9),
+            vec![RowOutcome::Failure(RowFailure::Model(ModelError::new(
+                "failed",
+            )))],
+        )
+        .unwrap();
+        let original = RecordBatch::try_from(ChunkResultRef::new(&schema, &result)).unwrap();
+        let inconsistent = RecordBatch::try_new(
+            original.schema(),
+            vec![
+                Arc::new(BooleanArray::from(vec![Some(true)])),
+                original.column(1).clone(),
+                original.column(2).clone(),
+                original.column(3).clone(),
+            ],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ChunkResult::try_from((&schema, &inconsistent)),
+            Err(ArrowConversionError::InconsistentOutcome { row: 0, .. })
         ));
     }
 
