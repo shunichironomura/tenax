@@ -4,9 +4,10 @@
 //! The current release implements conventional Patient Rule Induction Method
 //! (PRIM) analysis for static binary input/output datasets, plus a validated
 //! model schema, reproducible uniform sampler, transport-independent evaluator
-//! interface, and single-threaded in-process evaluation workflow. PRIM supports
-//! continuous, integer, and categorical inputs and returns the complete peeling
-//! and pasting trajectory with coverage, density, mass, and quasi-p diagnostics.
+//! interface, and sequential and Rayon-parallel in-process workflows. PRIM
+//! supports continuous, integer, and categorical inputs and returns the complete
+//! peeling and pasting trajectory with coverage, density, mass, and quasi-p
+//! diagnostics.
 //!
 //! # Example
 //!
@@ -37,9 +38,9 @@
 //!
 //! ```
 //! use tenax::{
-//!     Evaluator, InProcessEvaluator, InputRow, InputSchema, InputValue, ModelError,
-//!     ModelSchema, OutputSchema, OutputValue, RowContext, evaluation_to_dataset,
-//!     sample_uniform,
+//!     ChunkingPolicy, Evaluator, InputRow, InputSchema, InputValue, ModelError,
+//!     ModelSchema, OutputSchema, OutputValue, ParallelInProcessEvaluator, RowContext,
+//!     evaluation_to_dataset, sample_uniform,
 //! };
 //!
 //! let schema = ModelSchema::new(
@@ -48,7 +49,7 @@
 //! )?;
 //! let load_position = schema.input_position("load")?;
 //! let failure = schema.output_position("failure")?;
-//! let evaluator = InProcessEvaluator::new(
+//! let evaluator = ParallelInProcessEvaluator::new(
 //!     schema.clone(),
 //!     move |row: InputRow<'_>, _context: RowContext| {
 //!         let InputValue::Continuous(load) = row
@@ -59,6 +60,7 @@
 //!         };
 //!         Ok(vec![OutputValue::Boolean(load >= 0.7)])
 //!     },
+//!     ChunkingPolicy::new(64)?,
 //! );
 //!
 //! let request = sample_uniform(&schema, 1_000, 42, 0)?;
@@ -77,6 +79,7 @@ mod data;
 mod error;
 mod evaluation;
 mod input;
+mod parallel;
 mod prim;
 mod sampling;
 mod schema;
@@ -86,10 +89,11 @@ pub use data::{CategoricalView, Dataset, Feature, FeatureKind, FeatureView};
 pub use error::{DataError, PrimError};
 pub use evaluation::{
     ChunkResult, ChunkResultError, EvalRequest, EvaluationDatasetError, EvaluationId, Evaluator,
-    InProcessEvaluator, ModelError, OutputRow, OutputRowError, OutputValue, RowContext, RowFailure,
-    RowOutcome, evaluation_to_dataset,
+    InProcessEvaluator, ModelError, ModelPanic, OutputRow, OutputRowError, OutputValue, RowContext,
+    RowFailure, RowOutcome, evaluation_to_dataset,
 };
 pub use input::{InputAccessError, InputChunk, InputChunkError, InputRow, InputValue};
+pub use parallel::{ChunkingPolicy, ChunkingPolicyError, ParallelInProcessEvaluator};
 pub use prim::{
     BoxLimits, BoxStatistics, BoxStep, CategorySet, ContinuousRange, FeatureLimit, IntegerRange,
     Objective, Prim, PrimBox, PrimConfig, PrimPhase, QuasiPValue, Restriction,

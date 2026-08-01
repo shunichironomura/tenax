@@ -2,7 +2,7 @@
 
 > Hold fast under uncertainty.
 
-**Status:** Roadmap step 1 and the Phase A in-process slice of step 2 are implemented as an experimental Rust library. The API is not yet stable and no release has been published.
+**Status:** Roadmap step 1 and Phases A–B of the step 2 in-process workflow are implemented as an experimental Rust library. The API is not yet stable and no release has been published.
 
 Tenax is a Rust-first toolkit for scenario discovery and robust decision-making under deep uncertainty (DMDU). Scenario discovery identifies combinations of uncertain inputs under which a candidate policy succeeds or fails. Tenax aims to support both analysis of existing experiment data and adaptive evaluation of callable simulation models.
 
@@ -15,7 +15,8 @@ Tenax currently provides a complete single-process path from a callable model to
 - Validated model schemas with continuous and integer bounds, categorical domains, binary outputs, and optional input units.
 - Deterministic seeded uniform sampling with stable evaluation IDs and explicit model seeds.
 - A synchronous, transport-independent, batch-in/chunk-stream-out `Evaluator` trait.
-- Per-row success or failure data and a single-threaded in-process closure evaluator.
+- Per-row success or failure data, including returned model errors and caught unwinding panics.
+- Sequential and Rayon-parallel in-process closure evaluators, with an explicit fixed-row work-chunk policy and completion-order result streaming.
 - Zero-copy borrowed column views over the native `Vec`-backed container, including deterministic `Int32` categorical dictionary codes.
 - Explicit conversion of a successful evaluated chunk into a static PRIM dataset; failed rows are rejected rather than silently dropped.
 
@@ -62,9 +63,9 @@ A callable model uses the same schema and columnar request types that future pro
 
 ```rust
 use tenax::{
-    Evaluator, InProcessEvaluator, InputRow, InputSchema, InputValue, ModelError,
-    ModelSchema, OutputSchema, OutputValue, RowContext, evaluation_to_dataset,
-    sample_uniform,
+    ChunkingPolicy, Evaluator, InputRow, InputSchema, InputValue, ModelError,
+    ModelSchema, OutputSchema, OutputValue, ParallelInProcessEvaluator, RowContext,
+    evaluation_to_dataset, sample_uniform,
 };
 
 let schema = ModelSchema::new(
@@ -73,7 +74,7 @@ let schema = ModelSchema::new(
 )?;
 let load_position = schema.input_position("load")?;
 let failure_position = schema.output_position("failure")?;
-let evaluator = InProcessEvaluator::new(
+let evaluator = ParallelInProcessEvaluator::new(
     schema.clone(),
     move |row: InputRow<'_>, _context: RowContext| {
         let InputValue::Continuous(load) = row
@@ -84,6 +85,7 @@ let evaluator = InProcessEvaluator::new(
         };
         Ok(vec![OutputValue::Boolean(load >= 0.7)])
     },
+    ChunkingPolicy::new(64)?,
 );
 
 let request = sample_uniform(&schema, 1_000, 42, 0)?;
@@ -102,7 +104,7 @@ assert_eq!(dataset.row_count(), 1_000);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The evaluator yields one `ChunkResult` per request and may yield chunks out of request order. Each result retains row order within its request. The Phase A in-process evaluator is sequential; parallel and remote drivers are deferred.
+The parallel evaluator partitions request rows into explicit fixed-size work chunks and runs them on Rayon's global thread pool. It yields one `ChunkResult` per request in completion order, which may differ from request order, while restoring rows within each result to their original order. `InProcessEvaluator` remains available as the single-threaded reference implementation.
 
 ### Lake model workflow example
 
@@ -121,7 +123,7 @@ The selected box can also be projected onto every pair of restricted dimensions,
 
 ![Pairwise scatter plot of the lake model's restricted PRIM dimensions with selected box projections](examples/lake_model/prim_pairs_scatter.png)
 
-The example documents the current differences from EMA Workbench, including uniform rather than Latin hypercube sampling, joint rather than factorial experiments, binary output schemas, and sequential evaluation.
+The example documents the current differences from EMA Workbench, including uniform rather than Latin hypercube sampling, joint rather than factorial experiments, binary output schemas, and fixed-size Rayon work chunking.
 
 Run the complete test suite with `cargo test --all-targets --all-features`.
 
@@ -159,7 +161,7 @@ A model evaluator maps a batch of input configurations to model outputs. It may 
 ## Roadmap
 
 1. **Complete:** Implement conventional PRIM for static input/output datasets and establish a correctness test suite against EMA Workbench.
-2. **In progress (Phase A complete):** The transport-independent evaluator abstraction, validated model schema, seeded uniform sampling, and in-process end-to-end workflow are implemented. Parallel execution, Arrow interchange, and process transports remain for Phases B–D.
+2. **In progress (Phases A–B complete):** The transport-independent evaluator abstraction, validated model schema, seeded uniform sampling, in-process end-to-end workflow, and Rayon-parallel driver are implemented. Arrow interchange and process transports remain for Phases C–D.
 3. Implement adaptive scenario discovery with explicit acquisition and stopping rules. Benchmark it against fixed sampling, such as Latin hypercube sampling, on representative problems.
 4. Define a remote evaluation protocol that supports schema discovery, batch evaluation, failures, cancellation, and reproducible execution. Provide a CLI client and reference servers for Rust and Python.
 5. Publish a Python package that wraps the Rust core through PyO3 and provides a notebook-friendly API.
