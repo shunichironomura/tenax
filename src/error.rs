@@ -60,6 +60,21 @@ pub enum DataError {
         row: usize,
     },
 
+    /// A categorical dictionary code does not index its dictionary.
+    #[error(
+        "feature '{name}' contains invalid category code {code} at row {row} for a dictionary with {category_count} values"
+    )]
+    InvalidCategoryCode {
+        /// The feature containing the invalid code.
+        name: String,
+        /// Zero-based row containing the invalid code.
+        row: usize,
+        /// Rejected dictionary code.
+        code: i32,
+        /// Number of values in the supplied dictionary.
+        category_count: usize,
+    },
+
     /// A categorical feature cannot be represented by `Int32` codes.
     #[error("feature '{name}' has {count} categories, exceeding the Int32 code space")]
     TooManyCategories {

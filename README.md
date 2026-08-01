@@ -2,7 +2,7 @@
 
 > Hold fast under uncertainty.
 
-**Status:** Roadmap step 1 and Phases A–B of the step 2 in-process workflow are implemented as an experimental Rust library. The API is not yet stable and no release has been published.
+**Status:** Roadmap step 1 and Phases A–C of step 2 are implemented as an experimental Rust library. The API is not yet stable and no release has been published.
 
 Tenax is a Rust-first toolkit for scenario discovery and robust decision-making under deep uncertainty (DMDU). Scenario discovery identifies combinations of uncertain inputs under which a candidate policy succeeds or fails. Tenax aims to support both analysis of existing experiment data and adaptive evaluation of callable simulation models.
 
@@ -18,6 +18,7 @@ Tenax currently provides a complete single-process path from a callable model to
 - Per-row success or failure data, including returned model errors and caught unwinding panics.
 - Sequential and Rayon-parallel in-process closure evaluators, with an explicit fixed-row work-chunk policy and completion-order result streaming.
 - Zero-copy borrowed column views over the native `Vec`-backed container, including deterministic `Int32` categorical dictionary codes.
+- An optional, versioned Arrow boundary for model-schema discovery and evaluation requests, with strict `RecordBatch` validation and round-trip conversion.
 - Explicit conversion of a successful evaluated chunk into a static PRIM dataset; failed rows are rejected rather than silently dropped.
 
 Tenax also implements conventional Patient Rule Induction Method (PRIM) analysis for static binary input/output datasets:
@@ -106,6 +107,17 @@ assert_eq!(dataset.row_count(), 1_000);
 
 The parallel evaluator partitions request rows into explicit fixed-size work chunks and runs them on Rayon's global thread pool. It yields one `ChunkResult` per request in completion order, which may differ from request order, while restoring rows within each result to their original order. `InProcessEvaluator` remains available as the single-threaded reference implementation.
 
+### Arrow boundary
+
+Enable the optional `arrow` feature to convert complete `ModelSchema` discovery contracts and schema-bound `EvalRequest` values to and from Arrow. The mapping uses non-nullable `Float64`, `Int64`, `Dictionary<Int32, Utf8>`, and `Boolean` fields. Versioned metadata preserves field roles, input bounds, categorical domains, optional units, evaluation IDs, and request seeds. Decoding rejects missing metadata, nullability, non-finite values, schema mismatches, and invalid dictionaries at the boundary.
+
+```console
+cargo test --features arrow
+cargo bench --bench arrow_conversion --features arrow
+```
+
+The benchmark measures validated conversion of 1 million rows by 20 continuous features (160 MB). Representative release runs on an Apple M3 Max measured roughly 8–12 ms for native-to-Arrow conversion and 14–15 ms for Arrow-to-native conversion, confirming that the boundary copy is small relative to the intended model-evaluation workload. Results are machine-dependent.
+
 ### Lake model workflow example
 
 [`examples/lake_model/`](examples/lake_model/) applies the complete current workflow to the Direct Policy Search lake problem from EMA Workbench's open-exploration tutorial. It samples 5,000 joint uncertainty-policy inputs, evaluates the stochastic model with deterministic row seeds, classifies `max_P < 0.8`, runs PRIM, and exports the complete trajectory. A pinned Python script uses [XY](https://reflex.dev/docs/xy/) to produce interactive HTML and static PNG trade-off, experiment, and box-limit plots. Because XY does not yet provide a dedicated scatter-matrix composition, Matplotlib produces the EMA-style pairwise scatter-and-box plot.
@@ -161,7 +173,7 @@ A model evaluator maps a batch of input configurations to model outputs. It may 
 ## Roadmap
 
 1. **Complete:** Implement conventional PRIM for static input/output datasets and establish a correctness test suite against EMA Workbench.
-2. **In progress (Phases A–B complete):** The transport-independent evaluator abstraction, validated model schema, seeded uniform sampling, in-process end-to-end workflow, and Rayon-parallel driver are implemented. Arrow interchange and process transports remain for Phases C–D.
+2. **In progress (Phases A–C complete):** The transport-independent evaluator abstraction, validated model schema, seeded uniform sampling, in-process end-to-end workflow, Rayon-parallel driver, and feature-gated Arrow boundary are implemented. The subprocess transport and Latin hypercube sampling remain for Phase D.
 3. Implement adaptive scenario discovery with explicit acquisition and stopping rules. Benchmark it against fixed sampling, such as Latin hypercube sampling, on representative problems.
 4. Define a remote evaluation protocol that supports schema discovery, batch evaluation, failures, cancellation, and reproducible execution. Provide a CLI client and reference servers for Rust and Python.
 5. Publish a Python package that wraps the Rust core through PyO3 and provides a notebook-friendly API.
