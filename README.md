@@ -106,7 +106,7 @@ The evaluator yields one `ChunkResult` per request and may yield chunks out of r
 
 ### Lake model workflow example
 
-[`examples/lake_model/`](examples/lake_model/) applies the complete current workflow to the Direct Policy Search lake problem from EMA Workbench's open-exploration tutorial. It samples 5,000 joint uncertainty-policy inputs, evaluates the stochastic model with deterministic row seeds, classifies `max_P < 0.8`, runs PRIM, and exports the complete trajectory. A pinned Python script uses [XY](https://reflex.dev/docs/xy/) to produce interactive HTML and static PNG trade-off, experiment, and box-limit plots.
+[`examples/lake_model/`](examples/lake_model/) applies the complete current workflow to the Direct Policy Search lake problem from EMA Workbench's open-exploration tutorial. It samples 5,000 joint uncertainty-policy inputs, evaluates the stochastic model with deterministic row seeds, classifies `max_P < 0.8`, runs PRIM, and exports the complete trajectory. A pinned Python script uses [XY](https://reflex.dev/docs/xy/) to produce interactive HTML and static PNG trade-off, experiment, and box-limit plots. Because XY 0.0.1 does not yet support scatter-matrix composition, Matplotlib produces the EMA-style pairwise scatter-and-box plot.
 
 ```console
 cargo run --release --example lake_model
@@ -116,6 +116,10 @@ cargo run --release --example lake_model
 The pinned run produces a 59-step coverage-density trajectory. Its final candidate has 35.2% coverage, 97.3% density, and 5.28% mass, restricting `b`, `q`, and `mean`.
 
 ![Coverage-density trade-off for the lake model's PRIM trajectory, with the final candidate highlighted](examples/lake_model/prim_tradeoff.png)
+
+The selected box can also be projected onto every pair of restricted dimensions, with cases of interest in orange and box limits in red:
+
+![Pairwise scatter plot of the lake model's restricted PRIM dimensions with selected box projections](examples/lake_model/prim_pairs_scatter.png)
 
 The example documents the current differences from EMA Workbench, including uniform rather than Latin hypercube sampling, joint rather than factorial experiments, binary output schemas, and sequential evaluation.
 

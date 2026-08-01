@@ -2,13 +2,16 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#     "matplotlib>=3.11.1",
 #     "xy==0.0.1",
 # ]
 # ///
-"""Render Tenax's lake-model PRIM exports with XY.
+"""Render Tenax's lake-model PRIM exports with XY and Matplotlib.
 
-The script writes both self-contained interactive HTML and static PNG versions
-of the trade-off curve, a b/q experiment projection, and normalized box limits.
+XY writes self-contained interactive HTML and static PNG versions of the
+trade-off curve, a b/q experiment projection, and normalized box limits.
+Matplotlib writes the pairwise scatter-and-box matrix that XY 0.0.1 does not
+yet support.
 """
 
 from __future__ import annotations
@@ -21,6 +24,10 @@ from enum import Enum
 from pathlib import Path
 
 import xy
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch, Rectangle
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT = ROOT / "target" / "lake_model"
@@ -197,6 +204,33 @@ def limit_map(limits: Iterable[FeatureLimit]) -> dict[str, FeatureLimit]:
             raise ValueError(f"duplicate limit for feature {limit.feature!r}")
         indexed[limit.feature] = limit
     return indexed
+
+
+def restricted_feature_limits(
+    initial_limits: Sequence[FeatureLimit],
+    selected_limits: Sequence[FeatureLimit],
+    selected: TrajectoryStep,
+) -> list[FeatureLimit]:
+    """Return selected limits that differ exactly from the initial box."""
+
+    initial = limit_map(initial_limits)
+    selected_by_feature = limit_map(selected_limits)
+    if initial.keys() != selected_by_feature.keys():
+        raise ValueError("initial and selected boxes contain different features")
+    restricted = [
+        selected_by_feature[feature]
+        for feature, source in initial.items()
+        if (
+            selected_by_feature[feature].box_lower != source.box_lower
+            or selected_by_feature[feature].box_upper != source.box_upper
+        )
+    ]
+    if len(restricted) != selected.restricted_dimensions:
+        raise ValueError(
+            f"step {selected.index} reports {selected.restricted_dimensions} "
+            f"restricted dimensions, but its limits imply {len(restricted)}"
+        )
+    return restricted
 
 
 def is_box_member(experiment: Experiment, limits: Sequence[FeatureLimit]) -> bool:
@@ -522,6 +556,200 @@ def limits_chart(
     )
 
 
+def padded_interval(limit: FeatureLimit) -> tuple[float, float]:
+    """Add a small visual margin to one non-degenerate sampled interval."""
+
+    width = limit.domain_upper - limit.domain_lower
+    if not width > 0.0:
+        raise ValueError(
+            f"feature {limit.feature!r} has a degenerate declared domain "
+            f"[{limit.domain_lower}, {limit.domain_upper}]"
+        )
+    padding = 0.04 * width
+    return limit.domain_lower - padding, limit.domain_upper + padding
+
+
+def save_matplotlib_figure(figure: Figure, path: Path) -> None:
+    """Write a deterministic, compressed PNG from a Matplotlib figure."""
+
+    figure.savefig(
+        path,
+        dpi=140,
+        bbox_inches="tight",
+        facecolor="white",
+        pil_kwargs={"compress_level": 9, "optimize": True},
+    )
+
+
+def export_pairs_scatter(
+    path: Path,
+    experiments: Sequence[Experiment],
+    initial_limits: Sequence[FeatureLimit],
+    selected_limits: Sequence[FeatureLimit],
+    selected: TrajectoryStep,
+) -> None:
+    """Write an EMA-style pairwise scatter matrix with box projections."""
+
+    restricted = restricted_feature_limits(initial_limits, selected_limits, selected)
+    if not restricted:
+        figure = Figure(figsize=(7.0, 2.5), facecolor="white")
+        FigureCanvasAgg(figure)
+        axis = figure.subplots()
+        axis.set_axis_off()
+        axis.text(
+            0.5,
+            0.5,
+            f"PRIM step {selected.index} has no restricted dimensions",
+            ha="center",
+            va="center",
+            transform=axis.transAxes,
+        )
+        save_matplotlib_figure(figure, path)
+        return
+    initial = limit_map(initial_limits)
+    non_cases = [
+        experiment for experiment in experiments if not experiment.case_of_interest
+    ]
+    cases = [experiment for experiment in experiments if experiment.case_of_interest]
+    panel_count = len(restricted)
+    figure = Figure(
+        figsize=(3.1 * panel_count + 0.8, 3.0 * panel_count + 1.0),
+        facecolor="white",
+    )
+    FigureCanvasAgg(figure)
+    axes = figure.subplots(panel_count, panel_count, squeeze=False)
+    non_case_color = "#1f77b4"
+    case_color = "#ff7f0e"
+    box_color = "#dc2626"
+
+    for row, y_limit in enumerate(restricted):
+        for column, x_limit in enumerate(restricted):
+            axis = axes[row][column]
+            x_domain = padded_interval(x_limit)
+            axis.set_xlim(*x_domain)
+            axis.grid(color="#d1d5db", linewidth=0.7, alpha=0.8)
+            axis.set_axisbelow(True)
+
+            if row == column:
+                source = initial[x_limit.feature]
+                width = source.box_upper - source.box_lower
+                if not width > 0.0:
+                    raise ValueError(
+                        f"feature {source.feature!r} has a degenerate sampled range"
+                    )
+                bins = [source.box_lower + width * index / 30 for index in range(31)]
+                axis.hist(
+                    [experiment.values[x_limit.feature] for experiment in non_cases],
+                    bins=bins,
+                    density=True,
+                    color=non_case_color,
+                    alpha=0.28,
+                    edgecolor=non_case_color,
+                    linewidth=0.7,
+                )
+                axis.hist(
+                    [experiment.values[x_limit.feature] for experiment in cases],
+                    bins=bins,
+                    density=True,
+                    color=case_color,
+                    alpha=0.35,
+                    edgecolor=case_color,
+                    linewidth=0.8,
+                )
+                axis.axvspan(
+                    x_limit.box_lower,
+                    x_limit.box_upper,
+                    color=box_color,
+                    alpha=0.07,
+                    zorder=0,
+                )
+                axis.axvline(x_limit.box_lower, color=box_color, linewidth=1.6)
+                axis.axvline(x_limit.box_upper, color=box_color, linewidth=1.6)
+                axis.set_ylim(bottom=0.0)
+            else:
+                axis.scatter(
+                    [experiment.values[x_limit.feature] for experiment in non_cases],
+                    [experiment.values[y_limit.feature] for experiment in non_cases],
+                    s=11.0,
+                    color=non_case_color,
+                    alpha=0.48,
+                    edgecolors="white",
+                    linewidths=0.2,
+                    rasterized=True,
+                )
+                axis.scatter(
+                    [experiment.values[x_limit.feature] for experiment in cases],
+                    [experiment.values[y_limit.feature] for experiment in cases],
+                    s=15.0,
+                    color=case_color,
+                    alpha=0.78,
+                    edgecolors="white",
+                    linewidths=0.25,
+                    rasterized=True,
+                )
+                axis.add_patch(
+                    Rectangle(
+                        (x_limit.box_lower, y_limit.box_lower),
+                        x_limit.box_upper - x_limit.box_lower,
+                        y_limit.box_upper - y_limit.box_lower,
+                        fill=False,
+                        edgecolor=box_color,
+                        linewidth=2.2,
+                        zorder=10,
+                    )
+                )
+                axis.set_ylim(*padded_interval(y_limit))
+
+            if row == panel_count - 1:
+                axis.set_xlabel(x_limit.feature)
+            else:
+                axis.tick_params(labelbottom=False)
+            if column == 0:
+                axis.set_ylabel("Density" if row == column else y_limit.feature)
+            else:
+                axis.tick_params(labelleft=False)
+
+    legend_items = [
+        Line2D(
+            [],
+            [],
+            marker="o",
+            linestyle="none",
+            markerfacecolor=non_case_color,
+            markeredgecolor="white",
+            label="Not of interest",
+        ),
+        Line2D(
+            [],
+            [],
+            marker="o",
+            linestyle="none",
+            markerfacecolor=case_color,
+            markeredgecolor="white",
+            label="Case of interest",
+        ),
+        Patch(
+            facecolor="none",
+            edgecolor=box_color,
+            linewidth=2.2,
+            label="Selected box projection",
+        ),
+    ]
+    figure.suptitle(
+        f"Lake model PRIM step {selected.index}: pairwise restricted dimensions",
+        y=0.995,
+    )
+    figure.legend(
+        handles=legend_items,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.965),
+        ncols=3,
+        frameon=False,
+    )
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
+    save_matplotlib_figure(figure, path)
+
+
 def export_chart(chart: xy.Chart, stem: Path) -> None:
     """Write one interactive HTML chart and one deterministic static PNG."""
 
@@ -530,7 +758,7 @@ def export_chart(chart: xy.Chart, stem: Path) -> None:
 
 
 def main() -> None:
-    """Load Rust exports, validate them, and render three XY charts."""
+    """Load Rust exports, validate them, and render all analysis charts."""
 
     args = parse_args()
     output = args.output or args.input / "plots"
@@ -553,7 +781,14 @@ def main() -> None:
         limits_chart(limits[0], selected_limits, selected),
         output / "selected_box_limits",
     )
-    print(f"XY plots for PRIM step {selected.index} written to {output}")
+    export_pairs_scatter(
+        output / "prim_pairs_scatter.png",
+        experiments,
+        limits[0],
+        selected_limits,
+        selected,
+    )
+    print(f"Plots for PRIM step {selected.index} written to {output}")
 
 
 if __name__ == "__main__":

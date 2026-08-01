@@ -12,7 +12,8 @@ tutorial](https://emaworkbench.readthedocs.io/en/latest/indepth_tutorial/open-ex
 4. classify `max_P < 0.8` as the case of interest;
 5. fit the first conventional PRIM box and export its complete trajectory; and
 6. use Python and [XY](https://reflex.dev/docs/xy/) to create interactive HTML
-   and static PNG plots.
+   and static PNG plots, plus Matplotlib for an EMA-style pairwise
+   scatter-and-box matrix.
 
 The lake equations and constants follow EMA Workbench's
 [`dps_lake_model.py`](https://github.com/quaquel/EMAworkbench/blob/master/docs/source/indepth_tutorial/dps_lake_model.py).
@@ -39,7 +40,8 @@ cargo run --release --example lake_model -- /tmp/lake-analysis
 
 The plotting script uses `uv` inline metadata and a checked-in lockfile, so no
 separate Python environment setup is needed. It pins XY 0.0.1 because XY is
-currently an early-alpha library.
+currently an early-alpha library and uses the locked Matplotlib release for the
+pairwise plot.
 
 ## Outputs
 
@@ -62,8 +64,14 @@ versions of:
 - `plots/selected_box_limits`: an EMA-style normalized view of every restricted
   dimension.
 
-By default, the plots highlight the final trajectory step. Inspect another
-coverage-density trade-off without rerunning the model or PRIM, for example:
+It also writes `plots/prim_pairs_scatter.png`, a Matplotlib pair matrix analogous
+to EMA Workbench's `box.show_pairs_scatter(...)`. It includes only the selected
+candidate's restricted dimensions, colors all experiments by case-of-interest
+status, shows class histograms on the diagonal, and projects the selected box
+onto every off-diagonal feature pair.
+
+By default, all plots highlight the final trajectory step. Inspect another
+candidate without rerunning the model or PRIM, for example:
 
 ```console
 ./examples/lake_model/plot.py --step 44
@@ -107,6 +115,9 @@ byte-for-byte reproduction of EMA Workbench's notebook output:
   stochastic samples and exact trajectory differ.
 - Evaluation is sequential. Parallel execution and Latin hypercube sampling
   are deferred to later roadmap phases.
+- XY 0.0.1 does not yet provide scatter-matrix composition, so the three
+  single-panel plots use XY while the pairwise scatter-and-box matrix uses
+  Matplotlib.
 
 The documented lever domains include zero for `r1` and `r2`, while the DPS
 release equation divides by each radius. The model therefore rejects an exact
