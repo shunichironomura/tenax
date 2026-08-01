@@ -1,7 +1,19 @@
+//! Pins tenax's PRIM trajectories to EMA Workbench 3.0.0.
+//!
+//! The fixture is regenerated with `scripts/generate_ema_reference.py`.
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "the whole crate is test code, but `allow-unwrap-in-tests` only covers `#[test]` functions"
+)]
+
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
-use tenax::{Dataset, Feature, Objective, Prim, PrimConfig, PrimPhase, Restriction};
+use tenax::{
+    BoxLimits, BoxStatistics, Dataset, Feature, Objective, Prim, PrimConfig, PrimPhase,
+    QuasiPValue, Restriction,
+};
 
 const FIXTURE: &str = include_str!("fixtures/ema_workbench_3_0_0.json");
 const TOLERANCE: f64 = 2e-12;
@@ -107,9 +119,8 @@ fn trajectories_match_ema_workbench_3_0_0() {
     }
 }
 
-fn compare_case(reference: ReferenceCase) {
-    let features = reference
-        .features
+fn build_dataset(features: Vec<ReferenceFeature>, target: Vec<u8>) -> Dataset {
+    let features = features
         .into_iter()
         .map(|feature| match feature {
             ReferenceFeature::Continuous { name, values } => Feature::continuous(name, values),
@@ -118,25 +129,29 @@ fn compare_case(reference: ReferenceCase) {
         })
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let target = reference
-        .target
-        .into_iter()
-        .map(|value| value == 1)
-        .collect();
-    let dataset = Dataset::new(features, target).unwrap();
-    let objective = match reference.config.objective.as_str() {
+    let target = target.into_iter().map(|value| value == 1).collect();
+    Dataset::new(features, target).unwrap()
+}
+
+fn build_config(config: &ReferenceConfig) -> PrimConfig {
+    let objective = match config.objective.as_str() {
         "lenient1" => Objective::Lenient1,
         "lenient2" => Objective::Lenient2,
         "original" => Objective::Original,
         other => panic!("unknown fixture objective {other}"),
     };
-    let config = PrimConfig::new(
-        reference.config.peel_alpha,
-        reference.config.paste_alpha,
-        reference.config.mass_min,
+    PrimConfig::new(
+        config.peel_alpha,
+        config.paste_alpha,
+        config.mass_min,
         objective,
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn compare_case(reference: ReferenceCase) {
+    let dataset = build_dataset(reference.features, reference.target);
+    let config = build_config(&reference.config);
     let actual = Prim::new(&dataset, config).find_box().unwrap();
     let expected_pastes = reference
         .trajectory
@@ -168,61 +183,74 @@ fn compare_case(reference: ReferenceCase) {
         };
         assert_eq!(actual.phase(), expected_phase, "{context}: phase");
         previous_points = Some(expected.stats.points);
-        let stats = actual.statistics();
-        assert_close(stats.coverage(), expected.stats.coverage, &context);
-        assert_close(stats.density(), expected.stats.density, &context);
-        assert_close(stats.mean(), expected.stats.mean, &context);
-        assert_close(stats.mass(), expected.stats.mass, &context);
-        assert_eq!(
-            stats.restricted_dimensions(),
-            expected.stats.restricted_dimensions,
-            "{context}: restricted dimensions"
-        );
-        assert_eq!(stats.points(), expected.stats.points, "{context}: points");
-        assert_eq!(
-            stats.cases_of_interest(),
-            expected.stats.cases_of_interest,
-            "{context}: cases of interest"
-        );
+        compare_statistics(actual.statistics(), &expected.stats, &context);
         assert_eq!(actual.indices(), expected.indices, "{context}: row indices");
+        compare_limits(actual.limits(), expected.limits, &context);
+        compare_quasi_p_values(actual.quasi_p_values(), expected.quasi_p_values, &context);
+    }
+}
 
-        assert_eq!(actual.limits().limits().len(), expected.limits.len());
-        for (actual_limit, expected_limit) in actual.limits().limits().iter().zip(expected.limits) {
-            match (actual_limit.restriction(), expected_limit) {
-                (
-                    Restriction::Continuous(actual),
-                    ReferenceLimit::Continuous { name, lower, upper },
-                ) => {
-                    assert_eq!(actual_limit.name(), name, "{context}: feature name");
-                    assert_close(actual.lower(), lower, &context);
-                    assert_close(actual.upper(), upper, &context);
-                }
-                (Restriction::Integer(actual), ReferenceLimit::Integer { name, lower, upper }) => {
-                    assert_eq!(actual_limit.name(), name, "{context}: feature name");
-                    assert_eq!(actual.lower(), lower, "{context}: lower limit");
-                    assert_eq!(actual.upper(), upper, "{context}: upper limit");
-                }
-                (
-                    Restriction::Categorical(actual),
-                    ReferenceLimit::Categorical { name, categories },
-                ) => {
-                    assert_eq!(actual_limit.name(), name, "{context}: feature name");
-                    assert_eq!(actual.values(), &categories, "{context}: categories");
-                }
-                _ => panic!("{context}: limit type differs from EMA Workbench"),
+fn compare_statistics(actual: BoxStatistics, expected: &ReferenceStats, context: &str) {
+    assert_close(actual.coverage(), expected.coverage, context);
+    assert_close(actual.density(), expected.density, context);
+    assert_close(actual.mean(), expected.mean, context);
+    assert_close(actual.mass(), expected.mass, context);
+    assert_eq!(
+        actual.restricted_dimensions(),
+        expected.restricted_dimensions,
+        "{context}: restricted dimensions"
+    );
+    assert_eq!(actual.points(), expected.points, "{context}: points");
+    assert_eq!(
+        actual.cases_of_interest(),
+        expected.cases_of_interest,
+        "{context}: cases of interest"
+    );
+}
+
+fn compare_limits(actual: &BoxLimits, expected: Vec<ReferenceLimit>, context: &str) {
+    assert_eq!(
+        actual.limits().len(),
+        expected.len(),
+        "{context}: limit count"
+    );
+    for (actual_limit, expected_limit) in actual.limits().iter().zip(expected) {
+        match (actual_limit.restriction(), expected_limit) {
+            (
+                Restriction::Continuous(actual),
+                ReferenceLimit::Continuous { name, lower, upper },
+            ) => {
+                assert_eq!(actual_limit.name(), name, "{context}: feature name");
+                assert_close(actual.lower(), lower, context);
+                assert_close(actual.upper(), upper, context);
             }
+            (Restriction::Integer(actual), ReferenceLimit::Integer { name, lower, upper }) => {
+                assert_eq!(actual_limit.name(), name, "{context}: feature name");
+                assert_eq!(actual.lower(), lower, "{context}: lower limit");
+                assert_eq!(actual.upper(), upper, "{context}: upper limit");
+            }
+            (
+                Restriction::Categorical(actual),
+                ReferenceLimit::Categorical { name, categories },
+            ) => {
+                assert_eq!(actual_limit.name(), name, "{context}: feature name");
+                assert_eq!(actual.values(), &categories, "{context}: categories");
+            }
+            _ => panic!("{context}: limit type differs from EMA Workbench"),
         }
+    }
+}
 
-        assert_eq!(
-            actual.quasi_p_values().len(),
-            expected.quasi_p_values.len(),
-            "{context}: quasi-p value count"
-        );
-        for (actual_p, expected_p) in actual.quasi_p_values().iter().zip(expected.quasi_p_values) {
-            assert_eq!(actual_p.name(), expected_p.name, "{context}: p-value name");
-            assert_optional_close(actual_p.lower(), expected_p.lower, &context);
-            assert_optional_close(actual_p.upper(), expected_p.upper, &context);
-        }
+fn compare_quasi_p_values(actual: &[QuasiPValue], expected: Vec<ReferencePValue>, context: &str) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{context}: quasi-p value count"
+    );
+    for (actual_p, expected_p) in actual.iter().zip(expected) {
+        assert_eq!(actual_p.name(), expected_p.name, "{context}: p-value name");
+        assert_optional_close(actual_p.lower(), expected_p.lower, context);
+        assert_optional_close(actual_p.upper(), expected_p.upper, context);
     }
 }
 

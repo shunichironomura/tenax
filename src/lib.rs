@@ -1,6 +1,3 @@
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-
 //! Tenax provides scenario-discovery algorithms for decision-making under deep
 //! uncertainty.
 //!

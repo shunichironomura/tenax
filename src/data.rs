@@ -14,7 +14,7 @@ pub enum FeatureKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum FeatureData {
+pub enum FeatureData {
     Continuous(Vec<f64>),
     Integer(Vec<i64>),
     Categorical(Vec<String>),
@@ -70,12 +70,14 @@ impl Feature {
     }
 
     /// Returns the feature name.
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Returns the feature storage type.
-    pub fn kind(&self) -> FeatureKind {
+    #[must_use]
+    pub const fn kind(&self) -> FeatureKind {
         match &self.data {
             FeatureData::Continuous(_) => FeatureKind::Continuous,
             FeatureData::Integer(_) => FeatureKind::Integer,
@@ -84,7 +86,8 @@ impl Feature {
     }
 
     /// Returns the number of observations in the feature.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         match &self.data {
             FeatureData::Continuous(values) => values.len(),
             FeatureData::Integer(values) => values.len(),
@@ -96,11 +99,13 @@ impl Feature {
     ///
     /// Valid features are never empty; this method is provided for symmetry
     /// with other collection-like APIs.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns continuous values, or `None` for a differently typed feature.
+    #[must_use]
     pub fn continuous_values(&self) -> Option<&[f64]> {
         match &self.data {
             FeatureData::Continuous(values) => Some(values),
@@ -109,6 +114,7 @@ impl Feature {
     }
 
     /// Returns integer values, or `None` for a differently typed feature.
+    #[must_use]
     pub fn integer_values(&self) -> Option<&[i64]> {
         match &self.data {
             FeatureData::Integer(values) => Some(values),
@@ -117,6 +123,7 @@ impl Feature {
     }
 
     /// Returns categorical values, or `None` for a differently typed feature.
+    #[must_use]
     pub fn categorical_values(&self) -> Option<&[String]> {
         match &self.data {
             FeatureData::Categorical(values) => Some(values),
@@ -168,21 +175,25 @@ impl Dataset {
     }
 
     /// Returns the input features in schema order.
+    #[must_use]
     pub fn features(&self) -> &[Feature] {
         &self.features
     }
 
     /// Returns the binary outcome column.
+    #[must_use]
     pub fn cases_of_interest(&self) -> &[bool] {
         &self.cases_of_interest
     }
 
     /// Returns the number of observations.
-    pub fn row_count(&self) -> usize {
+    #[must_use]
+    pub const fn row_count(&self) -> usize {
         self.cases_of_interest.len()
     }
 
     /// Returns the number of cases of interest.
+    #[must_use]
     pub fn case_count(&self) -> usize {
         self.cases_of_interest
             .iter()
