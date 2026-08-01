@@ -1,17 +1,17 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.14"
 # dependencies = [
 #     "matplotlib>=3.11.1",
-#     "xy==0.0.1",
+#     "xy==0.0.5",
 # ]
 # ///
 """Render Tenax's lake-model PRIM exports with XY and Matplotlib.
 
 XY writes self-contained interactive HTML and static PNG versions of the
 trade-off curve, a b/q experiment projection, and normalized box limits.
-Matplotlib writes the pairwise scatter-and-box matrix that XY 0.0.1 does not
-yet support.
+Matplotlib writes the pairwise scatter-and-box matrix that XY does not yet
+support.
 """
 
 from __future__ import annotations

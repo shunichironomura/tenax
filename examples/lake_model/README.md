@@ -38,10 +38,10 @@ cargo run --release --example lake_model -- /tmp/lake-analysis
 ./examples/lake_model/plot.py --input /tmp/lake-analysis
 ```
 
-The plotting script uses `uv` inline metadata and a checked-in lockfile, so no
-separate Python environment setup is needed. It pins XY 0.0.1 because XY is
-currently an early-alpha library and uses the locked Matplotlib release for the
-pairwise plot.
+The plotting script requires Python 3.14 or newer and uses `uv` inline metadata
+with a checked-in lockfile, so no separate environment setup is needed. It pins
+XY 0.0.5 because XY's pre-1.0 releases may contain breaking changes and uses the
+locked Matplotlib release for the pairwise plot.
 
 ## Outputs
 
@@ -115,7 +115,7 @@ byte-for-byte reproduction of EMA Workbench's notebook output:
   stochastic samples and exact trajectory differ.
 - Evaluation is sequential. Parallel execution and Latin hypercube sampling
   are deferred to later roadmap phases.
-- XY 0.0.1 does not yet provide scatter-matrix composition, so the three
+- XY does not yet provide a dedicated scatter-matrix composition, so the three
   single-panel plots use XY while the pairwise scatter-and-box matrix uses
   Matplotlib.
 
