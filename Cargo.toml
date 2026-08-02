@@ -9,13 +9,7 @@ description = "Scenario discovery and robust decision-making under deep uncertai
 readme = "README.md"
 repository = "https://github.com/shunichironomura/tenax"
 license = "MIT OR Apache-2.0"
-keywords = [
-  "decision-making",
-  "prim",
-  "robust decision-making",
-  "scenario-discovery",
-  "uncertainty"
-]
+keywords = ["decision-making", "prim", "scenario-discovery", "uncertainty"]
 categories = ["algorithms", "mathematics", "science"]
 
 [package.metadata.docs.rs]
