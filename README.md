@@ -152,7 +152,7 @@ cargo test --features stdio --test stdio_workflow
 
 ### Lake model workflow example
 
-[`examples/lake_model/`](examples/lake_model/) applies the complete current workflow to the Direct Policy Search lake problem from EMA Workbench's open-exploration tutorial. It samples 5,000 joint uncertainty-policy inputs, evaluates the stochastic model with deterministic row seeds, classifies `max_P < 0.8`, runs PRIM, and exports the complete trajectory. A pinned Python script uses [XY](https://reflex.dev/docs/xy/) to produce interactive HTML and static PNG trade-off, experiment, and box-limit plots. Because XY does not yet provide a dedicated scatter-matrix composition, Matplotlib produces the EMA-style pairwise scatter-and-box plot.
+[`examples/lake_model/`](examples/lake_model/) applies the complete current workflow to the Direct Policy Search lake problem from EMA Workbench's open-exploration tutorial. It samples 5,000 joint uncertainty-policy inputs, evaluates the stochastic model with deterministic row seeds, classifies `max_P < 0.8`, runs PRIM, and exports the complete trajectory. A pinned Python script uses [XY](https://reflex.dev/docs/xy/) to produce interactive HTML and static PNG trade-off, experiment, and box-limit plots. XY's Matplotlib-compatible pyplot layer composes the EMA-style pairwise scatter-and-box plot, also exported as interactive HTML and static PNG, without requiring Matplotlib.
 
 ```console
 cargo run --release --example lake_model

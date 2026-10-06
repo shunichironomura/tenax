@@ -12,8 +12,8 @@ tutorial](https://emaworkbench.readthedocs.io/en/latest/indepth_tutorial/open-ex
 4. classify `max_P < 0.8` as the case of interest;
 5. fit the first conventional PRIM box and export its complete trajectory; and
 6. use Python and [XY](https://reflex.dev/docs/xy/) to create interactive HTML
-   and static PNG plots, plus Matplotlib for an EMA-style pairwise
-   scatter-and-box matrix.
+   and static PNG plots, including an EMA-style pairwise scatter-and-box
+   matrix composed with XY's Matplotlib-compatible pyplot layer.
 
 The lake equations and constants follow EMA Workbench's
 [`dps_lake_model.py`](https://github.com/quaquel/EMAworkbench/blob/master/docs/source/indepth_tutorial/dps_lake_model.py).
@@ -39,8 +39,8 @@ cargo run --release --example lake_model -- /tmp/lake-analysis
 
 The plotting script requires Python 3.14 or newer and uses `uv` inline metadata
 with a checked-in lockfile, so no separate environment setup is needed. It pins
-XY 0.0.5 because XY's pre-1.0 releases may contain breaking changes and uses the
-locked Matplotlib release for the pairwise plot.
+XY 0.0.5 because XY's pre-1.0 releases may contain breaking changes. Matplotlib
+is not required.
 
 ## Outputs
 
@@ -63,8 +63,9 @@ versions of:
 - `plots/selected_box_limits`: an EMA-style normalized view of every restricted
   dimension.
 
-It also writes `plots/prim_pairs_scatter.png`, a Matplotlib pair matrix analogous
-to EMA Workbench's `box.show_pairs_scatter(...)`. It includes only the selected
+It also writes `plots/prim_pairs_scatter.png` and `plots/prim_pairs_scatter.html`,
+an XY pyplot pair matrix analogous to EMA Workbench's
+`box.show_pairs_scatter(...)`. It includes only the selected
 candidate's restricted dimensions, colors all experiments by case-of-interest
 status, shows class histograms on the diagonal, and projects the selected box
 onto every off-diagonal feature pair.
@@ -115,9 +116,10 @@ byte-for-byte reproduction of EMA Workbench's notebook output:
 - Evaluation uses Rayon's global thread pool with an explicit 16-row work-chunk
   policy. Result rows are restored to request order, so parallel scheduling does
   not change row seeds or the pinned trajectory.
-- XY does not yet provide a dedicated scatter-matrix composition, so the three
-  single-panel plots use XY while the pairwise scatter-and-box matrix uses
-  Matplotlib.
+- XY does not yet provide a dedicated scatter-matrix helper; the pairwise
+  scatter-and-box matrix is manually composed using `xy.pyplot` subplots,
+  histograms, scatter marks, and closed lines for box projections. Rendering
+  uses XY rather than Matplotlib.
 
 The documented lever domains include zero for `r1` and `r2`, while the DPS
 release equation divides by each radius. The model therefore rejects an exact
