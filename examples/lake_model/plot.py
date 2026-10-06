@@ -2,16 +2,14 @@
 # /// script
 # requires-python = ">=3.14"
 # dependencies = [
-#     "matplotlib>=3.11.1",
 #     "xy==0.0.5",
 # ]
 # ///
-"""Render Tenax's lake-model PRIM exports with XY and Matplotlib.
+"""Render Tenax's lake-model PRIM exports with XY.
 
-XY writes self-contained interactive HTML and static PNG versions of the
-trade-off curve, a b/q experiment projection, and normalized box limits.
-Matplotlib writes the pairwise scatter-and-box matrix that XY does not yet
-support.
+XY writes self-contained interactive HTML and static PNG versions of all plots.
+Its Matplotlib-compatible pyplot layer composes the pairwise scatter-and-box
+matrix without depending on Matplotlib.
 """
 
 from __future__ import annotations
@@ -24,10 +22,7 @@ from enum import Enum
 from pathlib import Path
 
 import xy
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.figure import Figure
-from matplotlib.lines import Line2D
-from matplotlib.patches import Patch, Rectangle
+import xy.pyplot as plt
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT = ROOT / "target" / "lake_model"
@@ -569,16 +564,14 @@ def padded_interval(limit: FeatureLimit) -> tuple[float, float]:
     return limit.domain_lower - padding, limit.domain_upper + padding
 
 
-def save_matplotlib_figure(figure: Figure, path: Path) -> None:
-    """Write a deterministic, compressed PNG from a Matplotlib figure."""
+def export_pairs_figure(figure: plt.Figure, path: Path) -> None:
+    """Write the composed XY matrix as PNG and self-contained HTML."""
 
-    figure.savefig(
-        path,
-        dpi=140,
-        bbox_inches="tight",
-        facecolor="white",
-        pil_kwargs={"compress_level": 9, "optimize": True},
-    )
+    try:
+        figure.savefig(path, dpi=140, facecolor="white")
+        figure.savefig(path.with_suffix(".html"))
+    finally:
+        plt.close(figure)
 
 
 def export_pairs_scatter(
@@ -588,13 +581,11 @@ def export_pairs_scatter(
     selected_limits: Sequence[FeatureLimit],
     selected: TrajectoryStep,
 ) -> None:
-    """Write an EMA-style pairwise scatter matrix with box projections."""
+    """Compose an EMA-style pairwise matrix with XY's pyplot layer."""
 
     restricted = restricted_feature_limits(initial_limits, selected_limits, selected)
     if not restricted:
-        figure = Figure(figsize=(7.0, 2.5), facecolor="white")
-        FigureCanvasAgg(figure)
-        axis = figure.subplots()
+        figure, axis = plt.subplots(figsize=(7.0, 2.5), facecolor="white")
         axis.set_axis_off()
         axis.text(
             0.5,
@@ -604,7 +595,7 @@ def export_pairs_scatter(
             va="center",
             transform=axis.transAxes,
         )
-        save_matplotlib_figure(figure, path)
+        export_pairs_figure(figure, path)
         return
     initial = limit_map(initial_limits)
     non_cases = [
@@ -612,15 +603,17 @@ def export_pairs_scatter(
     ]
     cases = [experiment for experiment in experiments if experiment.case_of_interest]
     panel_count = len(restricted)
-    figure = Figure(
+    figure, axes = plt.subplots(
+        panel_count,
+        panel_count,
         figsize=(3.1 * panel_count + 0.8, 3.0 * panel_count + 1.0),
         facecolor="white",
+        squeeze=False,
     )
-    FigureCanvasAgg(figure)
-    axes = figure.subplots(panel_count, panel_count, squeeze=False)
     non_case_color = "#1f77b4"
     case_color = "#ff7f0e"
     box_color = "#dc2626"
+    legend_handles = []
 
     for row, y_limit in enumerate(restricted):
         for column, x_limit in enumerate(restricted):
@@ -638,19 +631,20 @@ def export_pairs_scatter(
                         f"feature {source.feature!r} has a degenerate sampled range"
                     )
                 bins = [source.box_lower + width * index / 30 for index in range(31)]
-                axis.hist(
+                non_case_hist = axis.hist(
                     [experiment.values[x_limit.feature] for experiment in non_cases],
                     bins=bins,
-                    density=True,
+                    # An absent class has zero bars, not an undefined density.
+                    density=bool(non_cases),
                     color=non_case_color,
                     alpha=0.28,
                     edgecolor=non_case_color,
                     linewidth=0.7,
                 )
-                axis.hist(
+                case_hist = axis.hist(
                     [experiment.values[x_limit.feature] for experiment in cases],
                     bins=bins,
-                    density=True,
+                    density=bool(cases),
                     color=case_color,
                     alpha=0.35,
                     edgecolor=case_color,
@@ -661,9 +655,12 @@ def export_pairs_scatter(
                     x_limit.box_upper,
                     color=box_color,
                     alpha=0.07,
-                    zorder=0,
                 )
-                axis.axvline(x_limit.box_lower, color=box_color, linewidth=1.6)
+                lower_boundary = axis.axvline(
+                    x_limit.box_lower, color=box_color, linewidth=1.6
+                )
+                if row == 0:
+                    legend_handles = [non_case_hist[2], case_hist[2], lower_boundary]
                 axis.axvline(x_limit.box_upper, color=box_color, linewidth=1.6)
                 axis.set_ylim(bottom=0.0)
             else:
@@ -675,7 +672,6 @@ def export_pairs_scatter(
                     alpha=0.48,
                     edgecolors="white",
                     linewidths=0.2,
-                    rasterized=True,
                 )
                 axis.scatter(
                     [experiment.values[x_limit.feature] for experiment in cases],
@@ -685,18 +681,25 @@ def export_pairs_scatter(
                     alpha=0.78,
                     edgecolors="white",
                     linewidths=0.25,
-                    rasterized=True,
                 )
-                axis.add_patch(
-                    Rectangle(
-                        (x_limit.box_lower, y_limit.box_lower),
-                        x_limit.box_upper - x_limit.box_lower,
-                        y_limit.box_upper - y_limit.box_lower,
-                        fill=False,
-                        edgecolor=box_color,
-                        linewidth=2.2,
-                        zorder=10,
-                    )
+                # A closed data-space line needs no Matplotlib Rectangle artist.
+                axis.plot(
+                    [
+                        x_limit.box_lower,
+                        x_limit.box_upper,
+                        x_limit.box_upper,
+                        x_limit.box_lower,
+                        x_limit.box_lower,
+                    ],
+                    [
+                        y_limit.box_lower,
+                        y_limit.box_lower,
+                        y_limit.box_upper,
+                        y_limit.box_upper,
+                        y_limit.box_lower,
+                    ],
+                    color=box_color,
+                    linewidth=2.2,
                 )
                 axis.set_ylim(*padded_interval(y_limit))
 
@@ -709,45 +712,20 @@ def export_pairs_scatter(
             else:
                 axis.tick_params(labelleft=False)
 
-    legend_items = [
-        Line2D(
-            [],
-            [],
-            marker="o",
-            linestyle="none",
-            markerfacecolor=non_case_color,
-            markeredgecolor="white",
-            label="Not of interest",
-        ),
-        Line2D(
-            [],
-            [],
-            marker="o",
-            linestyle="none",
-            markerfacecolor=case_color,
-            markeredgecolor="white",
-            label="Case of interest",
-        ),
-        Patch(
-            facecolor="none",
-            edgecolor=box_color,
-            linewidth=2.2,
-            label="Selected box projection",
-        ),
-    ]
     figure.suptitle(
         f"Lake model PRIM step {selected.index}: pairwise restricted dimensions",
         y=0.995,
     )
     figure.legend(
-        handles=legend_items,
+        handles=legend_handles,
+        labels=["Not of interest", "Case of interest", "Selected box projection"],
         loc="upper center",
         bbox_to_anchor=(0.5, 0.965),
         ncols=3,
         frameon=False,
     )
     figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
-    save_matplotlib_figure(figure, path)
+    export_pairs_figure(figure, path)
 
 
 def export_chart(chart: xy.Chart, stem: Path) -> None:
