@@ -389,7 +389,7 @@ pub struct ChunkResult {
 
 impl ChunkResult {
     pub(super) fn from_rows(id: EvaluationId, rows: Vec<RowOutcome>) -> Self {
-        debug_assert!(!rows.is_empty());
+        debug_assert_ne!(rows.len(), 0);
         Self { id, rows }
     }
 

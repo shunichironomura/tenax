@@ -384,7 +384,6 @@ impl Dataset {
     }
 
     /// Iterates over zero-copy input column views in schema order.
-    #[must_use]
     pub fn feature_views(&self) -> impl ExactSizeIterator<Item = FeatureView<'_>> {
         self.features.iter().map(Feature::view)
     }

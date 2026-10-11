@@ -1320,20 +1320,17 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "these quantiles are exactly representable, so the reference values must match bit for bit"
-    )]
     fn quantile_matches_ema_workbench_examples() {
         let values = (0..10).map(f64::from).collect::<Vec<_>>();
-        assert_eq!(quantile(&values, 0.9), 8.5);
-        assert_eq!(quantile(&values, 0.95), 8.5);
-        assert_eq!(quantile(&values, 0.1), 0.5);
-        assert_eq!(quantile(&values, 0.05), 0.5);
+        // These quantiles are exactly representable; compare bit for bit.
+        assert_eq!(quantile(&values, 0.9).to_bits(), 8.5_f64.to_bits());
+        assert_eq!(quantile(&values, 0.95).to_bits(), 8.5_f64.to_bits());
+        assert_eq!(quantile(&values, 0.1).to_bits(), 0.5_f64.to_bits());
+        assert_eq!(quantile(&values, 0.05).to_bits(), 0.5_f64.to_bits());
 
         let repeated = vec![1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 9.0];
-        assert_eq!(quantile(&repeated, 0.9), 8.5);
-        assert_eq!(quantile(&repeated, 0.1), 1.5);
+        assert_eq!(quantile(&repeated, 0.9).to_bits(), 8.5_f64.to_bits());
+        assert_eq!(quantile(&repeated, 0.1).to_bits(), 1.5_f64.to_bits());
     }
 
     #[test]
@@ -1371,14 +1368,11 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the degenerate tails return exactly 0.0 or 1.0 by early return"
-    )]
     fn binomial_tail_handles_boundaries() {
-        assert_eq!(binomial_greater(0, 5, 0.2), 1.0);
-        assert_eq!(binomial_greater(2, 5, 0.0), 0.0);
-        assert_eq!(binomial_greater(5, 5, 1.0), 1.0);
+        // Degenerate tails return exactly 0.0 or 1.0 by early return.
+        assert_eq!(binomial_greater(0, 5, 0.2).to_bits(), 1.0_f64.to_bits());
+        assert_eq!(binomial_greater(2, 5, 0.0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(binomial_greater(5, 5, 1.0).to_bits(), 1.0_f64.to_bits());
         assert!((binomial_greater(3, 5, 0.5) - 0.5).abs() < 1e-14);
     }
 }

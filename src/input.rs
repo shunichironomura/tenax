@@ -203,7 +203,6 @@ impl InputChunk {
     }
 
     /// Returns zero-copy views in model-schema order.
-    #[must_use]
     pub fn feature_views(&self) -> impl ExactSizeIterator<Item = FeatureView<'_>> {
         self.features.iter().map(Feature::view)
     }
@@ -231,7 +230,6 @@ impl InputChunk {
     }
 
     /// Iterates over borrowed rows in original order.
-    #[must_use]
     pub fn rows(&self) -> impl ExactSizeIterator<Item = InputRow<'_>> {
         (0..self.row_count).map(|index| self.row_in_bounds(index))
     }
