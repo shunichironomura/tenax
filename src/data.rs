@@ -178,6 +178,7 @@ impl Feature {
 
     // Normalizes a boundary dictionary without expanding every row to a String.
     // Unreferenced values are omitted to preserve `Feature::categorical` semantics.
+    #[cfg(any(feature = "arrow", test))]
     pub(crate) fn categorical_from_dictionary(
         name: impl Into<String>,
         codes: Vec<i32>,
