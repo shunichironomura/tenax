@@ -169,7 +169,11 @@ The selected box can also be projected onto every pair of restricted dimensions,
 
 The example documents the current differences from EMA Workbench, including its deliberate use of uniform rather than the now-available Latin-hypercube sampler, joint rather than factorial experiments, binary output schemas, and fixed-size Rayon work chunking.
 
-Run the complete test suite with `cargo test --all-targets --all-features`.
+Run the complete test suite with `cargo test --all-targets --all-features`, and run documentation examples separately with `cargo test --doc --all-features`.
+
+### Continuous integration
+
+[GitHub Actions](.github/workflows/ci.yaml) runs on pull requests and pushes to `main`. CI checks formatting, Clippy, and rustdoc with warnings denied; tests the core, Arrow, and stdio-enabled configurations on Linux, macOS, and Windows (including doctests); verifies each feature on the minimum Rust version declared in `Cargo.toml`; audits dependencies with RustSec; and validates workflows with actionlint and zizmor. Builds use the pinned `rust-toolchain.toml` and committed lockfile. The `CI gate` job requires every check to succeed and can be selected as a required status check in repository settings.
 
 ### Independent reference suite
 
