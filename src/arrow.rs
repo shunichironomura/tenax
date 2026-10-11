@@ -54,7 +54,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow_array::types::Int32Type;
@@ -62,7 +62,7 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, DictionaryArray, FixedSizeBinaryArray, Float64Array, Int32Array,
     Int64Array, StringArray, UInt8Array, UInt64Array,
 };
-use arrow_schema::{ArrowError as ArrowRsError, DataType, Field};
+use arrow_schema::{ArrowError as ArrowRsError, DataType, Field, Metadata};
 use thiserror::Error;
 
 pub use arrow_array::RecordBatch;
@@ -856,7 +856,7 @@ impl TryFrom<(&ModelSchema, RecordBatch)> for ChunkResult {
 }
 
 fn input_field(input: &InputSchema) -> Result<Field, ArrowConversionError> {
-    let mut metadata = HashMap::from([(
+    let mut metadata = Metadata::from([(
         FIELD_ROLE_METADATA_KEY.to_owned(),
         INPUT_FIELD_ROLE.to_owned(),
     )]);
@@ -904,7 +904,7 @@ fn output_field(output: &OutputSchema, nullable: bool) -> Field {
     let data_type = match output.kind() {
         OutputKind::Boolean => DataType::Boolean,
     };
-    Field::new(output.name(), data_type, nullable).with_metadata(HashMap::from([(
+    Field::new(output.name(), data_type, nullable).with_metadata(Metadata::from([(
         FIELD_ROLE_METADATA_KEY.to_owned(),
         OUTPUT_FIELD_ROLE.to_owned(),
     )]))
@@ -958,7 +958,7 @@ impl ProtocolField {
     }
 
     fn arrow_field(self) -> Field {
-        Field::new(self.name(), self.data_type(), self.nullable()).with_metadata(HashMap::from([
+        Field::new(self.name(), self.data_type(), self.nullable()).with_metadata(Metadata::from([
             (FIELD_ROLE_METADATA_KEY.to_owned(), self.role().to_owned()),
             (FIELD_KIND_METADATA_KEY.to_owned(), self.kind().to_owned()),
         ]))
@@ -1442,7 +1442,7 @@ fn required_field_metadata<'field>(
 }
 
 fn required_schema_metadata<'metadata>(
-    metadata: &'metadata HashMap<String, String>,
+    metadata: &'metadata Metadata,
     key: &'static str,
 ) -> Result<&'metadata str, ArrowConversionError> {
     metadata
@@ -1451,7 +1451,7 @@ fn required_schema_metadata<'metadata>(
         .ok_or(ArrowConversionError::MissingSchemaMetadata { key })
 }
 
-fn validate_version(metadata: &HashMap<String, String>) -> Result<(), ArrowConversionError> {
+fn validate_version(metadata: &Metadata) -> Result<(), ArrowConversionError> {
     let actual = required_schema_metadata(metadata, SCHEMA_VERSION_METADATA_KEY)?;
     if actual == SCHEMA_VERSION {
         Ok(())
@@ -1464,7 +1464,7 @@ fn validate_version(metadata: &HashMap<String, String>) -> Result<(), ArrowConve
 }
 
 fn validate_batch_kind(
-    metadata: &HashMap<String, String>,
+    metadata: &Metadata,
     expected: &'static str,
 ) -> Result<(), ArrowConversionError> {
     let actual = required_schema_metadata(metadata, BATCH_KIND_METADATA_KEY)?;
@@ -1500,8 +1500,8 @@ fn reject_nulls(field: &Field, array: &dyn Array) -> Result<(), ArrowConversionE
     }
 }
 
-fn batch_metadata(kind: &'static str) -> HashMap<String, String> {
-    HashMap::from([
+fn batch_metadata(kind: &'static str) -> Metadata {
+    Metadata::from([
         (
             SCHEMA_VERSION_METADATA_KEY.to_owned(),
             SCHEMA_VERSION.to_owned(),
@@ -1931,7 +1931,7 @@ mod tests {
         .unwrap();
         let original = RecordBatch::try_from(ChunkResultRef::new(&schema, &result)).unwrap();
         let extension = Field::new("graphcal.assertion_count", DataType::Int64, false)
-            .with_metadata(HashMap::from([(
+            .with_metadata(Metadata::from([(
                 FIELD_ROLE_METADATA_KEY.to_owned(),
                 EXTENSION_FIELD_ROLE.to_owned(),
             )]));
