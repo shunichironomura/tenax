@@ -1,0 +1,26 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:best-practices", "helpers:pinGitHubActionDigestsToSemver"],
+  minimumReleaseAge: "7 days",
+  lockFileMaintenance: {
+    enabled: true,
+  },
+  packageRules: [
+    {
+      matchUpdateTypes: ["lockFileMaintenance"],
+      minimumReleaseAge: null,
+    },
+    {
+      // Follow graphcal's policy until Cargo min-publish-age is stable.
+      description: "Disable Renovate cooldown for Cargo crates until Cargo min-publish-age is stable",
+      matchManagers: ["cargo"],
+      matchDatasources: ["crate"],
+      minimumReleaseAge: null,
+    },
+    {
+      matchManagers: ["rust-toolchain"],
+      matchDepTypes: ["toolchain"],
+      addLabels: ["rust", "ci"],
+    },
+  ],
+}
