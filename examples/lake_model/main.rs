@@ -11,13 +11,16 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use model::{DpsPolicy, LakeModel, LakeUncertainties};
+use tenax::graphcal_model_protocol::{
+    Domain, InputSlot, RowFailure, SessionInput, SessionSchema, Value,
+};
 use tenax::{
-    BoxStep, ChunkingPolicy, Dataset, Evaluator, FeatureDomain, FeatureView, InputPosition,
-    InputRow, InputSchema, InputValue, ModelError, ModelSchema, OutputSchema, OutputValue,
+    BoxStep, ChunkingPolicy, Dataset, Evaluator, FeatureView, InputRow, ModelSchemaBuilder,
     ParallelInProcessEvaluator, Prim, PrimBox, PrimPhase, Restriction, RowContext,
-    SchemaLookupError, evaluation_to_dataset, sample_uniform,
+    evaluation_to_dataset, sample_uniform,
 };
 use thiserror::Error;
 
@@ -29,55 +32,67 @@ const MAX_PHOSPHORUS_THRESHOLD: f64 = 0.8;
 const STOCHASTIC_REALIZATIONS: u32 = 150;
 const MODEL_YEARS: u32 = 100;
 const UTILITY_FROM_POLLUTION: f64 = 0.41;
+const DESIRABLE_OUTPUT: &str = "desirable_lake_state";
 
 #[derive(Clone, Copy, Debug)]
-struct LakeInputPositions {
-    decay_rate: InputPosition,
-    recycling_exponent: InputPosition,
-    inflow_mean: InputPosition,
-    inflow_standard_deviation: InputPosition,
-    discount_rate: InputPosition,
-    first_center: InputPosition,
-    second_center: InputPosition,
-    first_radius: InputPosition,
-    second_radius: InputPosition,
-    first_weight: InputPosition,
+struct LakeInputSlots {
+    decay_rate: InputSlot,
+    recycling_exponent: InputSlot,
+    inflow_mean: InputSlot,
+    inflow_standard_deviation: InputSlot,
+    discount_rate: InputSlot,
+    first_center: InputSlot,
+    second_center: InputSlot,
+    first_radius: InputSlot,
+    second_radius: InputSlot,
+    first_weight: InputSlot,
 }
 
-impl LakeInputPositions {
-    fn resolve(schema: &ModelSchema) -> Result<Self, SchemaLookupError> {
+impl LakeInputSlots {
+    fn resolve(schema: &SessionSchema) -> Result<Self, ExampleError> {
+        let slot = |name: &'static str| {
+            schema
+                .input_slot(name)
+                .ok_or(ExampleError::MissingInput { name })
+        };
         Ok(Self {
-            decay_rate: schema.input_position("b")?,
-            recycling_exponent: schema.input_position("q")?,
-            inflow_mean: schema.input_position("mean")?,
-            inflow_standard_deviation: schema.input_position("stdev")?,
-            discount_rate: schema.input_position("delta")?,
-            first_center: schema.input_position("c1")?,
-            second_center: schema.input_position("c2")?,
-            first_radius: schema.input_position("r1")?,
-            second_radius: schema.input_position("r2")?,
-            first_weight: schema.input_position("w1")?,
+            decay_rate: slot("b")?,
+            recycling_exponent: slot("q")?,
+            inflow_mean: slot("mean")?,
+            inflow_standard_deviation: slot("stdev")?,
+            discount_rate: slot("delta")?,
+            first_center: slot("c1")?,
+            second_center: slot("c2")?,
+            first_radius: slot("r1")?,
+            second_radius: slot("r2")?,
+            first_weight: slot("w1")?,
         })
     }
 
-    fn read(self, row: InputRow<'_>) -> Result<(LakeUncertainties, DpsPolicy), ModelError> {
+    fn read(self, row: InputRow<'_>) -> Result<(LakeUncertainties, DpsPolicy), RowFailure> {
         let uncertainties = LakeUncertainties::new(
-            continuous_value(row, self.decay_rate, "b")?,
-            continuous_value(row, self.recycling_exponent, "q")?,
-            continuous_value(row, self.inflow_mean, "mean")?,
-            continuous_value(row, self.inflow_standard_deviation, "stdev")?,
-            continuous_value(row, self.discount_rate, "delta")?,
+            row.quantity(self.decay_rate)?,
+            row.quantity(self.recycling_exponent)?,
+            row.quantity(self.inflow_mean)?,
+            row.quantity(self.inflow_standard_deviation)?,
+            row.quantity(self.discount_rate)?,
         )
-        .map_err(|error| ModelError::new(error.to_string()))?;
+        .map_err(evaluation_error)?;
         let policy = DpsPolicy::new(
-            continuous_value(row, self.first_center, "c1")?,
-            continuous_value(row, self.second_center, "c2")?,
-            continuous_value(row, self.first_radius, "r1")?,
-            continuous_value(row, self.second_radius, "r2")?,
-            continuous_value(row, self.first_weight, "w1")?,
+            row.quantity(self.first_center)?,
+            row.quantity(self.second_center)?,
+            row.quantity(self.first_radius)?,
+            row.quantity(self.second_radius)?,
+            row.quantity(self.first_weight)?,
         )
-        .map_err(|error| ModelError::new(error.to_string()))?;
+        .map_err(evaluation_error)?;
         Ok((uncertainties, policy))
+    }
+}
+
+fn evaluation_error(error: impl std::fmt::Display) -> RowFailure {
+    RowFailure::EvaluationError {
+        message: error.to_string(),
     }
 }
 
@@ -89,6 +104,12 @@ enum ExampleError {
     #[error("the in-process evaluator did not return its requested chunk")]
     MissingEvaluationResult,
 
+    #[error("the lake schema has no input named '{name}'")]
+    MissingInput { name: &'static str },
+
+    #[error("the lake schema has no output named '{name}'")]
+    MissingOutput { name: &'static str },
+
     #[error("PRIM did not return a first box for the non-empty lake dataset")]
     MissingPrimBox,
 
@@ -98,7 +119,7 @@ enum ExampleError {
         actual: tenax::FeatureKind,
     },
 
-    #[error("lake example input '{name}' unexpectedly has a non-continuous domain")]
+    #[error("lake example input '{name}' unexpectedly lacks a closed quantity domain")]
     NonContinuousDomain { name: String },
 
     #[error("PRIM limits do not contain lake input '{name}'")]
@@ -114,17 +135,21 @@ enum ExampleError {
 fn main() -> Result<(), Box<dyn Error>> {
     let output_directory = output_directory(env::args_os())?;
     let schema = lake_schema()?;
-    let positions = LakeInputPositions::resolve(&schema)?;
-    let desirable = schema.output_position("desirable_lake_state")?;
+    let slots = LakeInputSlots::resolve(&schema)?;
+    let desirable = schema
+        .output_slot(DESIRABLE_OUTPUT)
+        .ok_or(ExampleError::MissingOutput {
+            name: DESIRABLE_OUTPUT,
+        })?;
     let lake_model = LakeModel::new(UTILITY_FROM_POLLUTION, STOCHASTIC_REALIZATIONS, MODEL_YEARS)?;
     let evaluator = ParallelInProcessEvaluator::new(
         schema.clone(),
         move |row: InputRow<'_>, context: RowContext| {
-            let (uncertainties, policy) = positions.read(row)?;
+            let (uncertainties, policy) = slots.read(row)?;
             let outcomes = lake_model
                 .evaluate(uncertainties, policy, context.seed())
-                .map_err(|error| ModelError::new(error.to_string()))?;
-            Ok(vec![OutputValue::Boolean(
+                .map_err(evaluation_error)?;
+            Ok(vec![Value::Bool(
                 outcomes.max_phosphorus() < MAX_PHOSPHORUS_THRESHOLD,
             )])
         },
@@ -161,42 +186,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn lake_schema() -> Result<ModelSchema, tenax::SchemaError> {
-    ModelSchema::new(
-        vec![
-            // Deep uncertainties from the EMA Workbench tutorial.
-            InputSchema::continuous("b", 0.1, 0.45)?,
-            InputSchema::continuous("q", 2.0, 4.5)?,
-            InputSchema::continuous("mean", 0.01, 0.05)?,
-            InputSchema::continuous("stdev", 0.001, 0.005)?,
-            InputSchema::continuous("delta", 0.93, 0.99)?,
-            // Direct Policy Search levers from the same tutorial.
-            InputSchema::continuous("c1", -2.0, 2.0)?,
-            InputSchema::continuous("c2", -2.0, 2.0)?,
-            InputSchema::continuous("r1", 0.0, 2.0)?,
-            InputSchema::continuous("r2", 0.0, 2.0)?,
-            InputSchema::continuous("w1", 0.0, 1.0)?,
-        ],
-        // Current output schemas are binary, so classification happens at the
-        // model boundary rather than in a later Python dataframe operation.
-        vec![OutputSchema::boolean("desirable_lake_state")?],
-    )
+fn lake_schema() -> Result<Arc<SessionSchema>, tenax::ModelSchemaError> {
+    ModelSchemaBuilder::new()
+        // Deep uncertainties from the EMA Workbench tutorial.
+        .continuous("b", 0.1, 0.45)?
+        .continuous("q", 2.0, 4.5)?
+        .continuous("mean", 0.01, 0.05)?
+        .continuous("stdev", 0.001, 0.005)?
+        .continuous("delta", 0.93, 0.99)?
+        // Direct Policy Search levers from the same tutorial.
+        .continuous("c1", -2.0, 2.0)?
+        .continuous("c2", -2.0, 2.0)?
+        .continuous("r1", 0.0, 2.0)?
+        .continuous("r2", 0.0, 2.0)?
+        .continuous("w1", 0.0, 1.0)?
+        // PRIM needs a binary output, so classification happens at the model
+        // boundary rather than in a later Python dataframe operation.
+        .boolean_output(DESIRABLE_OUTPUT)?
+        .build()
 }
 
-fn continuous_value(
-    row: InputRow<'_>,
-    position: InputPosition,
-    name: &'static str,
-) -> Result<f64, ModelError> {
-    match row
-        .value(position)
-        .map_err(|error| ModelError::new(error.to_string()))?
-    {
-        InputValue::Continuous(value) => Ok(value),
-        value => Err(ModelError::new(format!(
-            "lake input '{name}' must be continuous, got {:?}",
-            value.kind()
-        ))),
+/// The closed bounds of a lake input, which are all dimensionless quantities.
+fn continuous_domain(input: &SessionInput) -> Result<(f64, f64), ExampleError> {
+    match input.domain() {
+        Some(Domain::Quantity(bounds)) => match (bounds.min(), bounds.max()) {
+            (Some(lower), Some(upper)) => Ok((lower.get(), upper.get())),
+            _ => Err(non_continuous_domain(input)),
+        },
+        _ => Err(non_continuous_domain(input)),
+    }
+}
+
+fn non_continuous_domain(input: &SessionInput) -> ExampleError {
+    ExampleError::NonContinuousDomain {
+        name: input.name().to_string(),
     }
 }
 
@@ -275,7 +298,7 @@ fn write_trajectory(path: &Path, prim_box: &PrimBox) -> io::Result<()> {
 
 fn write_limits(
     path: &Path,
-    schema: &ModelSchema,
+    schema: &SessionSchema,
     prim_box: &PrimBox,
 ) -> Result<(), Box<dyn Error>> {
     let mut writer = BufWriter::new(File::create(path)?);
@@ -284,19 +307,15 @@ fn write_limits(
     )?;
     for (step_index, step) in prim_box.trajectory().iter().enumerate() {
         for input in schema.inputs() {
-            let FeatureDomain::Continuous(domain) = input.domain() else {
-                return Err(ExampleError::NonContinuousDomain {
-                    name: input.name().to_owned(),
-                }
-                .into());
-            };
-            let Some(Restriction::Continuous(range)) = step.limits().get(input.name()) else {
-                return Err(match step.limits().get(input.name()) {
+            let name = input.name().as_str();
+            let (domain_lower, domain_upper) = continuous_domain(input)?;
+            let Some(Restriction::Continuous(range)) = step.limits().get(name) else {
+                return Err(match step.limits().get(name) {
                     Some(_) => ExampleError::NonContinuousLimit {
-                        name: input.name().to_owned(),
+                        name: name.to_owned(),
                     },
                     None => ExampleError::MissingFeatureLimit {
-                        name: input.name().to_owned(),
+                        name: name.to_owned(),
                     },
                 }
                 .into());
@@ -304,15 +323,13 @@ fn write_limits(
             let quasi_p = step
                 .quasi_p_values()
                 .iter()
-                .find(|value| value.name() == input.name());
+                .find(|value| value.name() == name);
 
             write!(writer, "{step_index},")?;
-            write_csv_field(&mut writer, input.name())?;
+            write_csv_field(&mut writer, name)?;
             write!(
                 writer,
-                ",{},{},{},{}",
-                domain.lower(),
-                domain.upper(),
+                ",{domain_lower},{domain_upper},{},{}",
                 range.lower(),
                 range.upper()
             )?;
@@ -327,7 +344,7 @@ fn write_limits(
 
 fn write_summary(
     path: &Path,
-    schema: &ModelSchema,
+    schema: &SessionSchema,
     dataset: &Dataset,
     prim_box: &PrimBox,
 ) -> Result<(), Box<dyn Error>> {
@@ -364,29 +381,22 @@ fn write_summary(
 
 fn write_restricted_limits(
     writer: &mut impl Write,
-    schema: &ModelSchema,
+    schema: &SessionSchema,
     initial_step: &BoxStep,
     selected_step: &BoxStep,
 ) -> Result<(), Box<dyn Error>> {
     for input in schema.inputs() {
-        let FeatureDomain::Continuous(_) = input.domain() else {
-            return Err(ExampleError::NonContinuousDomain {
-                name: input.name().to_owned(),
+        let name = input.name().as_str();
+        continuous_domain(input)?;
+        let Some(Restriction::Continuous(initial_range)) = initial_step.limits().get(name) else {
+            return Err(ExampleError::MissingFeatureLimit {
+                name: name.to_owned(),
             }
             .into());
         };
-        let Some(Restriction::Continuous(initial_range)) = initial_step.limits().get(input.name())
-        else {
+        let Some(Restriction::Continuous(selected_range)) = selected_step.limits().get(name) else {
             return Err(ExampleError::MissingFeatureLimit {
-                name: input.name().to_owned(),
-            }
-            .into());
-        };
-        let Some(Restriction::Continuous(selected_range)) =
-            selected_step.limits().get(input.name())
-        else {
-            return Err(ExampleError::MissingFeatureLimit {
-                name: input.name().to_owned(),
+                name: name.to_owned(),
             }
             .into());
         };
@@ -395,8 +405,7 @@ fn write_restricted_limits(
         {
             writeln!(
                 writer,
-                "  {}: [{}, {}]",
-                input.name(),
+                "  {name}: [{}, {}]",
                 selected_range.lower(),
                 selected_range.upper()
             )?;

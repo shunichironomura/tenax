@@ -1,472 +1,357 @@
-//! Validated columnar model-input chunks and borrowed row access.
+//! Zero-copy, typed access to one row of a protocol request batch.
 
+use std::fmt;
+
+use graphcal_model_protocol::{
+    Bounds, Domain, InputColumn, InputSlot, PortName, RequestBatch,
+    RowFailure as ProtocolRowFailure, ValueRef, VariantName,
+};
 use thiserror::Error;
 
-use crate::data::{Feature, FeatureKind, FeatureView};
-use crate::schema::{FeatureDomain, InputPosition, ModelSchema};
-
-/// Errors raised when input columns do not satisfy a [`ModelSchema`].
-#[derive(Clone, Debug, Error, PartialEq)]
-pub enum InputChunkError {
-    /// The number of input columns differs from the model schema.
-    #[error("input chunk has {actual} features, but the model schema requires {expected}")]
-    FeatureCountMismatch {
-        /// Number of schema inputs.
-        expected: usize,
-        /// Number of supplied columns.
-        actual: usize,
-    },
-
-    /// A column name differs from the corresponding schema input.
-    #[error(
-        "input column {position} is named '{actual}', but the model schema requires '{expected}'"
-    )]
-    FeatureNameMismatch {
-        /// Zero-based schema position.
-        position: usize,
-        /// Required input name.
-        expected: String,
-        /// Supplied feature name.
-        actual: String,
-    },
-
-    /// A column type differs from the corresponding schema input.
-    #[error("input '{name}' has kind {actual:?}, but the model schema requires {expected:?}")]
-    FeatureKindMismatch {
-        /// Name of the affected input.
-        name: String,
-        /// Required storage type.
-        expected: FeatureKind,
-        /// Supplied storage type.
-        actual: FeatureKind,
-    },
-
-    /// Input columns have different row counts.
-    #[error("input '{name}' has {actual} rows, but the chunk has {expected} rows")]
-    RowCountMismatch {
-        /// Name of the mismatched input.
-        name: String,
-        /// Row count established by the first column.
-        expected: usize,
-        /// Row count in this column.
-        actual: usize,
-    },
-
-    /// A continuous value lies outside its declared closed interval.
-    #[error("input '{name}' contains value {value} at row {row}, outside [{lower}, {upper}]")]
-    ContinuousOutOfBounds {
-        /// Name of the affected input.
-        name: String,
-        /// Zero-based row containing the value.
-        row: usize,
-        /// Rejected value.
-        value: f64,
-        /// Inclusive schema lower bound.
-        lower: f64,
-        /// Inclusive schema upper bound.
-        upper: f64,
-    },
-
-    /// An integer value lies outside its declared closed interval.
-    #[error("input '{name}' contains value {value} at row {row}, outside [{lower}, {upper}]")]
-    IntegerOutOfBounds {
-        /// Name of the affected input.
-        name: String,
-        /// Zero-based row containing the value.
-        row: usize,
-        /// Rejected value.
-        value: i64,
-        /// Inclusive schema lower bound.
-        lower: i64,
-        /// Inclusive schema upper bound.
-        upper: i64,
-    },
-
-    /// A categorical value does not belong to its declared category set.
-    #[error("input '{name}' contains unknown category '{category}' at row {row}")]
-    UnknownCategory {
-        /// Name of the affected input.
-        name: String,
-        /// Zero-based row containing the value.
-        row: usize,
-        /// Rejected category.
-        category: String,
-    },
-
-    /// A categorical dictionary code cannot be resolved.
-    #[error("input '{name}' contains invalid category code {code} at row {row}")]
-    InvalidCategoryCode {
-        /// Name of the affected input.
-        name: String,
-        /// Zero-based row containing the invalid code.
-        row: usize,
-        /// Rejected dictionary code.
-        code: i32,
-    },
+/// The kind of one protocol value, used to report access mismatches.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ValueKind {
+    /// A finite real quantity.
+    Quantity,
+    /// A signed integer.
+    Int,
+    /// A Boolean.
+    Bool,
+    /// A categorical key variant.
+    Key,
 }
 
-/// Errors raised when looking up a value in an [`InputRow`].
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum InputAccessError {
-    /// The requested row position does not exist.
-    #[error("row index {index} is out of bounds for a chunk with {row_count} rows")]
-    RowIndexOutOfBounds {
-        /// Requested zero-based row position.
-        index: usize,
-        /// Number of rows in the chunk.
-        row_count: usize,
-    },
-
-    /// The requested feature position does not exist.
-    #[error("feature index {index} is out of bounds for a row with {feature_count} features")]
-    FeatureIndexOutOfBounds {
-        /// Requested zero-based feature position.
-        index: usize,
-        /// Number of features in the row.
-        feature_count: usize,
-    },
-
-    /// A categorical dictionary code cannot be resolved.
-    #[error("feature '{name}' has invalid category code {code} at row {row}")]
-    InvalidCategoryCode {
-        /// Name of the affected feature.
-        name: String,
-        /// Zero-based row containing the invalid code.
-        row: usize,
-        /// Rejected dictionary code.
-        code: i32,
-    },
-}
-
-/// One typed value borrowed from an input row.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum InputValue<'data> {
-    /// A continuous value.
-    Continuous(f64),
-    /// An integer value.
-    Integer(i64),
-    /// A categorical dictionary value.
-    Categorical(&'data str),
-}
-
-impl InputValue<'_> {
-    /// Returns the value's storage type.
+impl ValueKind {
+    /// Returns the kind of a borrowed protocol value.
     #[must_use]
-    pub const fn kind(&self) -> FeatureKind {
-        match self {
-            Self::Continuous(_) => FeatureKind::Continuous,
-            Self::Integer(_) => FeatureKind::Integer,
-            Self::Categorical(_) => FeatureKind::Categorical,
+    pub const fn of(value: &ValueRef<'_>) -> Self {
+        match value {
+            ValueRef::Quantity(_) => Self::Quantity,
+            ValueRef::Int(_) => Self::Int,
+            ValueRef::Bool(_) => Self::Bool,
+            ValueRef::Key(_) => Self::Key,
         }
     }
 }
 
-/// A non-empty set of model inputs stored as typed columns.
-///
-/// Construction validates names, kinds, row counts, and every value against a
-/// model schema. Evaluators validate again against their own discovered schema
-/// so a chunk cannot accidentally be sent to a different model.
-#[derive(Clone, Debug, PartialEq)]
-pub struct InputChunk {
-    features: Vec<Feature>,
-    row_count: usize,
-}
-
-impl InputChunk {
-    /// Constructs and validates a model-input chunk.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InputChunkError`] when the columns differ from `schema`, have
-    /// unequal row counts, or contain a value outside its declared domain.
-    pub fn new(schema: &ModelSchema, features: Vec<Feature>) -> Result<Self, InputChunkError> {
-        let row_count = validate_features(schema, &features)?;
-        Ok(Self {
-            features,
-            row_count,
+impl fmt::Display for ValueKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Quantity => "quantity",
+            Self::Int => "integer",
+            Self::Bool => "Boolean",
+            Self::Key => "key",
         })
     }
+}
 
-    /// Revalidates this chunk against an evaluator's schema.
+/// Errors raised when reading a value from an [`InputRow`].
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum InputAccessError {
+    /// The requested row does not exist in the batch.
+    #[error("row index {index} is out of bounds for a batch with {row_count} rows")]
+    RowIndexOutOfBounds {
+        /// Requested zero-based row position.
+        index: usize,
+        /// Number of rows in the batch.
+        row_count: usize,
+    },
+
+    /// The slot does not belong to the batch's session schema.
+    #[error("input slot {slot} is out of bounds for a session with {input_count} inputs")]
+    UnknownSlot {
+        /// Requested zero-based input slot.
+        slot: usize,
+        /// Number of inputs the session varies.
+        input_count: usize,
+    },
+
+    /// The input has a different kind from the one requested.
+    #[error("input '{input}' is a {actual} input, not a {expected} input")]
+    KindMismatch {
+        /// The accessed input.
+        input: PortName,
+        /// The kind the caller requested.
+        expected: ValueKind,
+        /// The input's wire kind.
+        actual: ValueKind,
+    },
+}
+
+/// Reports an input access error as a model evaluation error, so an in-process
+/// model can propagate it with `?`.
+impl From<InputAccessError> for ProtocolRowFailure {
+    fn from(error: InputAccessError) -> Self {
+        Self::EvaluationError {
+            message: error.to_string(),
+        }
+    }
+}
+
+/// A zero-copy view of one row of a [`RequestBatch`].
+///
+/// Values are addressed by the [`InputSlot`]s of the batch's session schema,
+/// obtained once with [`graphcal_model_protocol::SessionSchema::input_slot`].
+#[derive(Clone, Copy, Debug)]
+pub struct InputRow<'a> {
+    batch: &'a RequestBatch,
+    index: usize,
+}
+
+impl<'a> InputRow<'a> {
+    /// Borrows row `index` of `batch`.
     ///
     /// # Errors
     ///
-    /// Returns [`InputChunkError`] for any schema or domain mismatch.
-    pub fn validate_against(&self, schema: &ModelSchema) -> Result<(), InputChunkError> {
-        validate_features(schema, &self.features).map(|_| ())
-    }
-
-    /// Returns columns in model-schema order.
-    #[must_use]
-    pub fn features(&self) -> &[Feature] {
-        &self.features
-    }
-
-    /// Returns zero-copy views in model-schema order.
-    pub fn feature_views(&self) -> impl ExactSizeIterator<Item = FeatureView<'_>> {
-        self.features.iter().map(Feature::view)
-    }
-
-    /// Returns the number of input rows.
-    #[must_use]
-    pub const fn row_count(&self) -> usize {
-        self.row_count
-    }
-
-    /// Borrows one row by zero-based position.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InputAccessError`] when `index` is outside this chunk.
-    pub const fn row(&self, index: usize) -> Result<InputRow<'_>, InputAccessError> {
-        if index < self.row_count {
-            Ok(self.row_in_bounds(index))
+    /// Returns [`InputAccessError::RowIndexOutOfBounds`] when `index` is
+    /// outside the batch.
+    pub const fn new(batch: &'a RequestBatch, index: usize) -> Result<Self, InputAccessError> {
+        if index < batch.rows() {
+            Ok(Self { batch, index })
         } else {
             Err(InputAccessError::RowIndexOutOfBounds {
                 index,
-                row_count: self.row_count,
+                row_count: batch.rows(),
             })
         }
     }
 
-    /// Iterates over borrowed rows in original order.
-    pub fn rows(&self) -> impl ExactSizeIterator<Item = InputRow<'_>> {
-        (0..self.row_count).map(|index| self.row_in_bounds(index))
+    /// Iterates over every row of `batch` in order.
+    pub fn all(batch: &'a RequestBatch) -> impl ExactSizeIterator<Item = Self> {
+        (0..batch.rows()).map(move |index| Self { batch, index })
     }
 
-    pub(super) const fn row_in_bounds(&self, index: usize) -> InputRow<'_> {
-        debug_assert!(index < self.row_count);
-        InputRow { chunk: self, index }
+    pub(crate) fn in_bounds(batch: &'a RequestBatch, index: usize) -> Self {
+        debug_assert!(index < batch.rows());
+        Self { batch, index }
     }
 
-    /// Consumes the chunk and returns its owned columns.
-    #[must_use]
-    pub fn into_features(self) -> Vec<Feature> {
-        self.features
-    }
-}
-
-/// A zero-copy row facade over an [`InputChunk`].
-#[derive(Clone, Copy, Debug)]
-pub struct InputRow<'data> {
-    chunk: &'data InputChunk,
-    index: usize,
-}
-
-impl<'data> InputRow<'data> {
-    /// Returns the row's zero-based position within its request chunk.
+    /// Returns the row's zero-based position within its batch.
     #[must_use]
     pub const fn index(&self) -> usize {
         self.index
     }
 
-    /// Returns the number of input features.
+    /// Returns the borrowed request batch.
     #[must_use]
-    pub const fn feature_count(&self) -> usize {
-        self.chunk.features.len()
+    pub const fn batch(&self) -> &'a RequestBatch {
+        self.batch
     }
 
-    /// Returns one typed value by schema position.
+    /// Returns the value of the input at `slot`.
     ///
     /// # Errors
     ///
-    /// Returns [`InputAccessError`] when `position` does not belong to this
-    /// chunk's schema or a categorical code violates the validated column
-    /// invariant.
-    pub fn value(&self, position: InputPosition) -> Result<InputValue<'data>, InputAccessError> {
-        let Some(feature) = self.chunk.features.get(position.index()) else {
-            return Err(InputAccessError::FeatureIndexOutOfBounds {
-                index: position.index(),
-                feature_count: self.chunk.features.len(),
-            });
-        };
-        match feature.view() {
-            FeatureView::Continuous(values) => Ok(InputValue::Continuous(values[self.index])),
-            FeatureView::Integer(values) => Ok(InputValue::Integer(values[self.index])),
-            FeatureView::Categorical(values) => {
-                let code = values.codes()[self.index];
-                values.category(code).map_or_else(
-                    || {
-                        Err(InputAccessError::InvalidCategoryCode {
-                            name: feature.name().to_owned(),
-                            row: self.index,
-                            code,
-                        })
-                    },
-                    |category| Ok(InputValue::Categorical(category)),
-                )
-            }
+    /// Returns [`InputAccessError::UnknownSlot`] when `slot` does not belong to
+    /// the batch's session schema.
+    pub fn value(&self, slot: InputSlot) -> Result<ValueRef<'a>, InputAccessError> {
+        self.batch
+            .value(slot, self.index)
+            .ok_or_else(|| self.unknown_slot(slot))
+    }
+
+    /// Returns the quantity at `slot`, in the input's wire unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InputAccessError`] for an unknown slot or a non-quantity
+    /// input.
+    pub fn quantity(&self, slot: InputSlot) -> Result<f64, InputAccessError> {
+        match self.value(slot)? {
+            ValueRef::Quantity(value) => Ok(value.get()),
+            value => Err(self.mismatch(slot, ValueKind::Quantity, &value)),
         }
+    }
+
+    /// Returns the integer at `slot`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InputAccessError`] for an unknown slot or a non-integer input.
+    pub fn int(&self, slot: InputSlot) -> Result<i64, InputAccessError> {
+        match self.value(slot)? {
+            ValueRef::Int(value) => Ok(value),
+            value => Err(self.mismatch(slot, ValueKind::Int, &value)),
+        }
+    }
+
+    /// Returns the Boolean at `slot`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InputAccessError`] for an unknown slot or a non-Boolean input.
+    pub fn bool(&self, slot: InputSlot) -> Result<bool, InputAccessError> {
+        match self.value(slot)? {
+            ValueRef::Bool(value) => Ok(value),
+            value => Err(self.mismatch(slot, ValueKind::Bool, &value)),
+        }
+    }
+
+    /// Returns the categorical variant at `slot`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InputAccessError`] for an unknown slot or a non-key input.
+    pub fn key(&self, slot: InputSlot) -> Result<&'a VariantName, InputAccessError> {
+        match self.value(slot)? {
+            ValueRef::Key(variant) => Ok(variant),
+            value => Err(self.mismatch(slot, ValueKind::Key, &value)),
+        }
+    }
+
+    fn unknown_slot(&self, slot: InputSlot) -> InputAccessError {
+        InputAccessError::UnknownSlot {
+            slot: slot.get(),
+            input_count: self.batch.schema().inputs().len(),
+        }
+    }
+
+    fn mismatch(
+        &self,
+        slot: InputSlot,
+        expected: ValueKind,
+        actual: &ValueRef<'_>,
+    ) -> InputAccessError {
+        self.batch.schema().input(slot).map_or_else(
+            || self.unknown_slot(slot),
+            |input| InputAccessError::KindMismatch {
+                input: input.name().clone(),
+                expected,
+                actual: ValueKind::of(actual),
+            },
+        )
+    }
+
+    /// Returns the first input of this row, in session order, whose value lies
+    /// outside its declared domain, reported with the protocol's
+    /// [`ProtocolRowFailure::InputOutOfDomain`] vocabulary.
+    pub(crate) fn domain_violation(&self) -> Option<ProtocolRowFailure> {
+        self.batch
+            .schema()
+            .inputs()
+            .iter()
+            .zip(self.batch.columns())
+            .find_map(|(input, column)| {
+                let message = match (input.domain()?, column) {
+                    (Domain::Quantity(bounds), InputColumn::Quantity(values)) => {
+                        violation(bounds, values.get(self.index)?)
+                    }
+                    (Domain::Int(bounds), InputColumn::Int(values)) => {
+                        violation(bounds, values.get(self.index)?)
+                    }
+                    _ => None,
+                }?;
+                Some(ProtocolRowFailure::InputOutOfDomain {
+                    parameter: input.name().clone(),
+                    message,
+                })
+            })
     }
 }
 
-fn validate_features(schema: &ModelSchema, features: &[Feature]) -> Result<usize, InputChunkError> {
-    if features.len() != schema.inputs().len() {
-        return Err(InputChunkError::FeatureCountMismatch {
-            expected: schema.inputs().len(),
-            actual: features.len(),
-        });
+fn violation<T: PartialOrd + fmt::Display>(bounds: &Bounds<T>, value: &T) -> Option<String> {
+    if bounds.contains(value) {
+        return None;
     }
-
-    let row_count = match features.first() {
-        Some(feature) => feature.len(),
-        None => {
-            return Err(InputChunkError::FeatureCountMismatch {
-                expected: schema.inputs().len(),
-                actual: 0,
-            });
-        }
-    };
-
-    for (position, (input, feature)) in schema.inputs().iter().zip(features).enumerate() {
-        if input.name() != feature.name() {
-            return Err(InputChunkError::FeatureNameMismatch {
-                position,
-                expected: input.name().to_owned(),
-                actual: feature.name().to_owned(),
-            });
-        }
-        if input.kind() != feature.kind() {
-            return Err(InputChunkError::FeatureKindMismatch {
-                name: input.name().to_owned(),
-                expected: input.kind(),
-                actual: feature.kind(),
-            });
-        }
-        if feature.len() != row_count {
-            return Err(InputChunkError::RowCountMismatch {
-                name: input.name().to_owned(),
-                expected: row_count,
-                actual: feature.len(),
-            });
-        }
-        validate_domain(input.name(), input.domain(), feature.view())?;
-    }
-
-    Ok(row_count)
-}
-
-fn validate_domain(
-    name: &str,
-    domain: &FeatureDomain,
-    values: FeatureView<'_>,
-) -> Result<(), InputChunkError> {
-    match (domain, values) {
-        (FeatureDomain::Continuous(domain), FeatureView::Continuous(values)) => values
-            .iter()
-            .position(|value| *value < domain.lower() || *value > domain.upper())
-            .map_or(Ok(()), |row| {
-                Err(InputChunkError::ContinuousOutOfBounds {
-                    name: name.to_owned(),
-                    row,
-                    value: values[row],
-                    lower: domain.lower(),
-                    upper: domain.upper(),
-                })
-            }),
-        (FeatureDomain::Integer(domain), FeatureView::Integer(values)) => values
-            .iter()
-            .position(|value| *value < domain.lower() || *value > domain.upper())
-            .map_or(Ok(()), |row| {
-                Err(InputChunkError::IntegerOutOfBounds {
-                    name: name.to_owned(),
-                    row,
-                    value: values[row],
-                    lower: domain.lower(),
-                    upper: domain.upper(),
-                })
-            }),
-        (FeatureDomain::Categorical(domain), FeatureView::Categorical(values)) => {
-            for (row, code) in values.codes().iter().copied().enumerate() {
-                let Some(category) = values.category(code) else {
-                    return Err(InputChunkError::InvalidCategoryCode {
-                        name: name.to_owned(),
-                        row,
-                        code,
-                    });
-                };
-                if !domain.contains(category) {
-                    return Err(InputChunkError::UnknownCategory {
-                        name: name.to_owned(),
-                        row,
-                        category: category.to_owned(),
-                    });
-                }
-            }
-            Ok(())
-        }
-        _ => Err(InputChunkError::FeatureKindMismatch {
-            name: name.to_owned(),
-            expected: domain.kind(),
-            actual: values.kind(),
-        }),
-    }
+    Some(match (bounds.min(), bounds.max()) {
+        (Some(min), Some(max)) => format!("value {value} lies outside [{min}, {max}]"),
+        (Some(min), None) => format!("value {value} is less than the minimum {min}"),
+        (None, Some(max)) => format!("value {value} is greater than the maximum {max}"),
+        (None, None) => format!("value {value} lies outside its domain"),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{InputSchema, OutputSchema};
+    use std::sync::Arc;
 
-    fn schema() -> ModelSchema {
-        ModelSchema::new(
+    use graphcal_model_protocol::{FiniteF64, SessionSchema, VariantPosition, WireType};
+
+    use super::*;
+    use crate::ModelSchemaBuilder;
+
+    fn schema() -> Arc<SessionSchema> {
+        ModelSchemaBuilder::new()
+            .continuous("x", 0.0, 1.0)
+            .unwrap()
+            .categorical("mode", "Mode", ["safe", "risky"])
+            .unwrap()
+            .integer("n", 0, 3)
+            .unwrap()
+            .boolean_output("failure")
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn batch(schema: &Arc<SessionSchema>, x: f64, n: i64) -> RequestBatch {
+        let WireType::Key(mode) = schema.inputs()[1].wire() else {
+            panic!("mode must be a key input");
+        };
+        let risky: VariantPosition = mode.position("risky").unwrap();
+        RequestBatch::new(
+            Arc::clone(schema),
             vec![
-                InputSchema::continuous("x", 0.0, 1.0).unwrap(),
-                InputSchema::categorical("mode", vec!["safe".to_owned(), "risky".to_owned()])
-                    .unwrap(),
+                InputColumn::Quantity(vec![FiniteF64::new(x).unwrap()]),
+                InputColumn::Key(vec![risky]),
+                InputColumn::Int(vec![n]),
             ],
-            vec![OutputSchema::boolean("failure").unwrap()],
         )
         .unwrap()
     }
 
     #[test]
-    fn validates_values_against_the_declared_domain() {
-        let error = InputChunk::new(
-            &schema(),
-            vec![
-                Feature::continuous("x", vec![0.5, 1.1]).unwrap(),
-                Feature::categorical("mode", vec!["safe".to_owned(), "risky".to_owned()]).unwrap(),
-            ],
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            InputChunkError::ContinuousOutOfBounds { row: 1, .. }
-        ));
-    }
-
-    #[test]
-    fn rejects_unknown_categories() {
-        let error = InputChunk::new(
-            &schema(),
-            vec![
-                Feature::continuous("x", vec![0.5]).unwrap(),
-                Feature::categorical("mode", vec!["unknown".to_owned()]).unwrap(),
-            ],
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            InputChunkError::UnknownCategory { row: 0, .. }
-        ));
-    }
-
-    #[test]
     fn rows_expose_typed_values_without_copying() {
         let schema = schema();
-        let x = schema.input_position("x").unwrap();
-        let mode = schema.input_position("mode").unwrap();
-        let chunk = InputChunk::new(
-            &schema,
-            vec![
-                Feature::continuous("x", vec![0.25]).unwrap(),
-                Feature::categorical("mode", vec!["risky".to_owned()]).unwrap(),
-            ],
-        )
-        .unwrap();
-        let row = chunk.row(0).unwrap();
-        assert_eq!(row.value(x), Ok(InputValue::Continuous(0.25)));
-        assert_eq!(row.value(mode), Ok(InputValue::Categorical("risky")));
+        let x = schema.input_slot("x").unwrap();
+        let mode = schema.input_slot("mode").unwrap();
+        let n = schema.input_slot("n").unwrap();
+        let batch = batch(&schema, 0.25, 2);
+        let row = InputRow::new(&batch, 0).unwrap();
+        assert_eq!(row.quantity(x), Ok(0.25));
+        assert_eq!(row.key(mode).unwrap().as_str(), "risky");
+        assert_eq!(row.int(n), Ok(2));
+        assert_eq!(InputRow::all(&batch).len(), 1);
+    }
+
+    #[test]
+    fn kind_mismatches_and_bad_rows_are_typed_errors() {
+        let schema = schema();
+        let x = schema.input_slot("x").unwrap();
+        let batch = batch(&schema, 0.25, 2);
+        let row = InputRow::new(&batch, 0).unwrap();
+        assert_eq!(
+            row.bool(x),
+            Err(InputAccessError::KindMismatch {
+                input: PortName::new("x").unwrap(),
+                expected: ValueKind::Bool,
+                actual: ValueKind::Quantity,
+            })
+        );
+        assert_eq!(
+            InputRow::new(&batch, 1).unwrap_err(),
+            InputAccessError::RowIndexOutOfBounds {
+                index: 1,
+                row_count: 1
+            }
+        );
+        assert!(matches!(
+            ProtocolRowFailure::from(row.int(x).unwrap_err()),
+            ProtocolRowFailure::EvaluationError { .. }
+        ));
+    }
+
+    #[test]
+    fn reports_the_first_out_of_domain_input() {
+        let schema = schema();
+        let inside = batch(&schema, 1.0, 3);
+        assert_eq!(InputRow::new(&inside, 0).unwrap().domain_violation(), None);
+
+        let outside = batch(&schema, 1.5, 4);
+        assert!(matches!(
+            InputRow::new(&outside, 0).unwrap().domain_violation(),
+            Some(ProtocolRowFailure::InputOutOfDomain { parameter, .. })
+                if parameter.as_str() == "x"
+        ));
     }
 }

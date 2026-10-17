@@ -1,54 +1,43 @@
 //! Exercises the complete seeded sample → parallel evaluate → PRIM workflow.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use tenax::graphcal_model_protocol::{InputSlot, RowFailure, SessionSchema, Value};
 use tenax::{
-    ChunkingPolicy, EvalRequest, Evaluator, InputPosition, InputRow, InputSchema, InputValue,
-    ModelError, ModelSchema, Objective, OutputSchema, OutputValue, ParallelInProcessEvaluator,
-    Prim, PrimConfig, Restriction, RowContext, SchemaError, evaluation_to_dataset, sample_uniform,
+    ChunkingPolicy, EvalRequest, Evaluator, InputRow, ModelSchemaBuilder, ModelSchemaError,
+    Objective, ParallelInProcessEvaluator, Prim, PrimConfig, Restriction, RowContext,
+    evaluation_to_dataset, sample_uniform,
 };
 
-fn toy_schema() -> Result<ModelSchema, SchemaError> {
-    ModelSchema::new(
-        vec![
-            InputSchema::continuous("load", 0.0, 1.0)?,
-            InputSchema::categorical("regime", vec!["stable".to_owned(), "fragile".to_owned()])?,
-        ],
-        vec![OutputSchema::boolean("failure")?],
-    )
+fn toy_schema() -> Result<Arc<SessionSchema>, ModelSchemaError> {
+    ModelSchemaBuilder::new()
+        .continuous("load", 0.0, 1.0)?
+        .categorical("regime", "Regime", ["fragile", "stable"])?
+        .boolean_output("failure")?
+        .build()
 }
 
 fn evaluate_toy_model(
     row: InputRow<'_>,
-    load_position: InputPosition,
-    regime_position: InputPosition,
-) -> Result<Vec<OutputValue>, ModelError> {
-    let InputValue::Continuous(load) = row
-        .value(load_position)
-        .map_err(|error| ModelError::new(error.to_string()))?
-    else {
-        return Err(ModelError::new("load must be continuous"));
-    };
-    let InputValue::Categorical(regime) = row
-        .value(regime_position)
-        .map_err(|error| ModelError::new(error.to_string()))?
-    else {
-        return Err(ModelError::new("regime must be categorical"));
-    };
-
-    Ok(vec![OutputValue::Boolean(
-        load >= 0.7 && regime == "fragile",
+    load: InputSlot,
+    regime: InputSlot,
+) -> Result<Vec<Value>, RowFailure> {
+    let load = row.quantity(load)?;
+    let regime = row.key(regime)?;
+    Ok(vec![Value::Bool(
+        load >= 0.7 && regime.as_str() == "fragile",
     )])
 }
 
 #[test]
 fn sampling_through_in_process_evaluation_recovers_the_known_failure_region() {
     let schema = toy_schema().unwrap();
-    let load = schema.input_position("load").unwrap();
-    let regime = schema.input_position("regime").unwrap();
-    let failure = schema.output_position("failure").unwrap();
+    let load = schema.input_slot("load").unwrap();
+    let regime = schema.input_slot("regime").unwrap();
+    let failure = schema.output_slot("failure").unwrap();
     let evaluator = ParallelInProcessEvaluator::new(
-        schema.clone(),
+        Arc::clone(&schema),
         move |row: InputRow<'_>, _context: RowContext| evaluate_toy_model(row, load, regime),
         ChunkingPolicy::new(64).unwrap(),
     );
