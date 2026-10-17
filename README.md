@@ -10,17 +10,16 @@ The initial algorithmic focus is the Patient Rule Induction Method (PRIM). Addit
 
 ## Current functionality
 
-Tenax currently provides a complete path from a callable in-process or subprocess model to scenario discovery:
+Tenax currently provides a complete path from a Graphcal model or an in-process Rust model to scenario discovery:
 
-- Validated model schemas with continuous and integer bounds, categorical domains, binary outputs, and optional input units.
+- Model schemas, requests, values, and per-row failures in the vocabulary of the [Graphcal](https://github.com/graphcal-lang/graphcal) batch model-evaluation protocol: unit-aware quantity, integer, Boolean, and categorical key inputs and outputs with declared domains.
+- A typed `ModelSchemaBuilder` that declares the session schema of a simple Rust model.
 - Deterministic seeded uniform and mixed-domain Latin-hypercube sampling with stable evaluation IDs and explicit model seeds.
-- A synchronous, transport-independent, batch-in/chunk-stream-out `Evaluator` trait that separates per-row failures from evaluator/process failures.
-- Per-row success or failure data, including returned model errors and caught unwinding panics.
+- A synchronous, transport-independent, batch-in/result-stream-out `Evaluator` trait that separates per-row failures from evaluator/process failures.
+- Per-row success or failure data: failed assertions, out-of-domain inputs, and evaluation errors reported by the model, plus caught unwinding panics and invalid outputs.
 - Sequential and Rayon-parallel in-process closure evaluators, with an explicit fixed-row work-chunk policy and completion-order result streaming.
-- Zero-copy borrowed column views over the native `Vec`-backed container, including deterministic `Int32` categorical dictionary codes.
-- An optional, versioned Arrow boundary for model-schema discovery, fixed-schema request streams, nullable-output result streams, per-row statuses, and extensible peer diagnostics.
-- A persistent subprocess evaluator over bidirectional stdio Arrow IPC, including startup discovery, out-of-order result matching, clean shutdown, and a reference Rust server shell.
-- Explicit conversion of a successful evaluated chunk into a static PRIM dataset; failed rows are rejected rather than silently dropped.
+- A `GraphcalEvaluator` (optional `graphcal` feature) that drives a Graphcal model through a persistent `graphcal model serve` session.
+- Explicit conversion of a successful evaluation with a Boolean output into a static PRIM dataset; failed rows are rejected rather than silently dropped.
 
 Tenax also implements conventional Patient Rule Induction Method (PRIM) analysis for static binary input/output datasets:
 
@@ -61,31 +60,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### In-process model workflow
 
-A callable model uses the same schema and columnar request types as the subprocess and future network adapters:
+A simple Rust model declares its inputs and outputs with `ModelSchemaBuilder` and runs as a closure. It reads typed values from a zero-copy `InputRow` and returns one protocol `Value` per output, or a protocol `RowFailure` (a failed assertion, an out-of-domain input, or another evaluation error): the same per-row vocabulary a Graphcal model uses.
 
 ```rust
+use tenax::graphcal_model_protocol::{RowFailure, Value};
 use tenax::{
-    ChunkingPolicy, Evaluator, InputRow, InputSchema, InputValue, ModelError,
-    ModelSchema, OutputSchema, OutputValue, ParallelInProcessEvaluator, RowContext,
-    evaluation_to_dataset, sample_uniform,
+    ChunkingPolicy, Evaluator, InputRow, ModelSchemaBuilder, ParallelInProcessEvaluator,
+    RowContext, evaluation_to_dataset, sample_uniform,
 };
 
-let schema = ModelSchema::new(
-    vec![InputSchema::continuous("load", 0.0, 1.0)?],
-    vec![OutputSchema::boolean("failure")?],
-)?;
-let load_position = schema.input_position("load")?;
-let failure_position = schema.output_position("failure")?;
+let schema = ModelSchemaBuilder::new()
+    .continuous("load", 0.0, 1.0)?
+    .categorical("regime", "Regime", ["stable", "fragile"])?
+    .boolean_output("failure")?
+    .build()?;
+let load = schema.input_slot("load").expect("load is an input");
+let regime = schema.input_slot("regime").expect("regime is an input");
+let failure = schema.output_slot("failure").expect("failure is an output");
 let evaluator = ParallelInProcessEvaluator::new(
     schema.clone(),
-    move |row: InputRow<'_>, _context: RowContext| {
-        let InputValue::Continuous(load) = row
-            .value(load_position)
-            .map_err(|error| ModelError::new(error.to_string()))?
-        else {
-            return Err(ModelError::new("load must be continuous"));
-        };
-        Ok(vec![OutputValue::Boolean(load >= 0.7)])
+    move |row: InputRow<'_>, _context: RowContext| -> Result<Vec<Value>, RowFailure> {
+        let fragile = row.key(regime)?.as_str() == "fragile";
+        Ok(vec![Value::Bool(fragile && row.quantity(load)? >= 0.7)])
     },
     ChunkingPolicy::new(64)?,
 );
@@ -95,60 +91,50 @@ let retained_request = request.clone();
 let result = evaluator
     .evaluate(vec![request])
     .next()
-    .expect("one request produces one result chunk")?;
-let dataset = evaluation_to_dataset(
-    &schema,
-    retained_request,
-    result,
-    failure_position,
-)?;
+    .expect("one request produces one result")?;
+let dataset = evaluation_to_dataset(&schema, retained_request, result, failure)?;
 assert_eq!(dataset.row_count(), 1_000);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The parallel evaluator partitions request rows into explicit fixed-size work chunks and runs them on Rayon's global thread pool. It yields one `ChunkResult` per request in completion order, which may differ from request order, while restoring rows within each result to their original order. `InProcessEvaluator` remains available as the single-threaded reference implementation.
+Before invoking the model, in-process evaluators reject a request built for another session schema and fail rows whose quantity or integer inputs lie outside their declared domains, as a Graphcal model would. The parallel evaluator partitions request rows into explicit fixed-size work chunks and runs them on Rayon's global thread pool. It yields one `ChunkResult` per request in completion order, which may differ from request order, while restoring rows within each result to their original order. `InProcessEvaluator` remains available as the single-threaded reference implementation.
 
-### Sampling
+### Graphcal models
 
-`sample_uniform` draws each input independently. `sample_latin_hypercube` places exactly one continuous sample in each equal-probability stratum and uses independently permuted midpoint inverse-CDF strata for integer and categorical domains. The discrete construction remains balanced when rows outnumber available values. Both methods derive feature streams, request IDs, and model seeds deterministically from the run seed and request sequence.
-
-### Arrow boundary
-
-Enable the optional `arrow` feature to convert complete `ModelSchema` discovery contracts plus schema-bound `EvalRequest` and `ChunkResult` values to and from Arrow. Inputs use non-nullable `Float64`, `Int64`, and `Dictionary<Int32, Utf8>` fields. Discovery outputs are non-nullable `Boolean`; result outputs are nullable so failed rows need no sentinel. Versioned metadata preserves roles, domains, and optional units. Fixed-size binary evaluation IDs, `UInt64` seeds, status codes, and failure messages are columns, allowing many request/result batches to share one standard IPC stream schema. Decoding rejects missing metadata, inconsistent context, invalid status/null combinations, non-finite values, schema mismatches, and invalid dictionaries at the boundary.
-
-```console
-cargo test --features arrow
-cargo bench --bench arrow_conversion --features arrow
-```
-
-The benchmark measures validated conversion of 1 million rows by 20 continuous features (160 MB of model inputs), plus 24 MB of fixed evaluation-ID and seed context. A representative release run on an Apple M3 Max measured about 9.5–9.6 ms native-to-Arrow and 15.05–15.14 ms Arrow-to-native. Results are machine-dependent; rerun the benchmark when changing the container or protocol mapping.
-
-### Stdio subprocess transport
-
-Enable `stdio` (which includes `arrow`) to launch a persistent model server. The child writes a schema-only discovery IPC stream followed by a long-lived result stream on stdout, and reads one long-lived request stream on stdin. Request context lives in columns, results may arrive out of request order, and one failed model row remains data while broken IPC or process exit is an evaluator error.
+Enable the `graphcal` feature to evaluate a Graphcal model. The re-exported `graphcal_model_client` describes the model, selects the parameters a session varies and the outputs it reads, and starts one persistent `graphcal model serve` process. `GraphcalEvaluator` sends each Tenax request through that session:
 
 ```rust
-use std::process::Command;
-use tenax::{Evaluator, StdioEvaluator, sample_latin_hypercube};
+use tenax::graphcal_model_client::{Bool, GraphcalCommand, Model, Quantity};
+use tenax::{Evaluator, GraphcalEvaluator, evaluation_to_dataset, sample_latin_hypercube};
 
-let command = Command::new("./my-model-server");
-let evaluator = StdioEvaluator::spawn(command)?;
-let request = sample_latin_hypercube(evaluator.schema(), 10_000, 42, 0)?;
+let model = Model::describe(GraphcalCommand::new("reliability.gcl"))?;
+let load = model.input::<Quantity>("load")?;
+let failure = model.output::<Bool>("failure")?;
+let session = model.session().vary(&load).output(&failure).spawn()?;
+
+let evaluator = GraphcalEvaluator::new(session);
+let schema = evaluator.schema().clone();
+let request = sample_latin_hypercube(&schema, 10_000, 42, 0)?;
+let retained_request = request.clone();
 let result = evaluator
     .evaluate(vec![request])
     .next()
     .expect("one request produces one result")?;
-assert_eq!(result.rows().len(), 10_000);
-let status = evaluator.shutdown()?;
-assert!(status.success());
+evaluator.shutdown()?;
+let failure = schema.output_slot("failure").expect("the session reads failure");
+let dataset = evaluation_to_dataset(&schema, retained_request, result, failure)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Rust model servers can use `serve_stdio`; Graphcal and Python servers can implement the same language-neutral contract directly. See [`docs/stdio-arrow-ipc.md`](docs/stdio-arrow-ipc.md) for the exact startup sequence, field metadata, ID byte order, status codes, extension fields, and Graphcal binding guidance. The integration test launches a real child and exercises Latin-hypercube sample → stdio IPC evaluate → PRIM:
+Graphcal models are deterministic, so the request seed is not sent to the server. Quantities are sampled and analyzed in their wire units, and samplers require both domain bounds of every varied quantity and integer parameter. The integration test runs Latin-hypercube sample → `graphcal model serve` → PRIM against a real `graphcal` executable:
 
 ```console
-cargo test --features stdio --test stdio_workflow
+GRAPHCAL_BIN=/path/to/graphcal cargo test --features graphcal --test graphcal_workflow -- --ignored
 ```
+
+### Sampling
+
+`sample_uniform` draws each input independently. `sample_latin_hypercube` places exactly one quantity sample in each equal-probability stratum and uses independently permuted midpoint inverse-CDF strata for integer, key, and Boolean inputs. The discrete construction remains balanced when rows outnumber available values. Both methods derive input streams, request IDs, and model seeds deterministically from the run seed and request sequence.
 
 ### Lake model workflow example
 
@@ -167,13 +153,13 @@ The selected box can also be projected onto every pair of restricted dimensions,
 
 ![Pairwise scatter plot of the lake model's restricted PRIM dimensions with selected box projections](examples/lake_model/prim_pairs_scatter.png)
 
-The example documents the current differences from EMA Workbench, including its deliberate use of uniform rather than the now-available Latin-hypercube sampler, joint rather than factorial experiments, binary output schemas, and fixed-size Rayon work chunking.
+The example documents the current differences from EMA Workbench, including its deliberate use of uniform rather than the now-available Latin-hypercube sampler, joint rather than factorial experiments, a binary classification output, and fixed-size Rayon work chunking.
 
 Run the complete test suite with `cargo test --all-targets --all-features`, and run documentation examples separately with `cargo test --doc --all-features`.
 
 ### Continuous integration
 
-[GitHub Actions](.github/workflows/ci.yaml) runs on pull requests and pushes to `main`. CI checks formatting, Clippy, and rustdoc with warnings denied; tests the core, Arrow, and stdio-enabled configurations on Linux, macOS, and Windows (including doctests); verifies each feature on the minimum Rust version declared in `Cargo.toml`; audits dependencies with RustSec; and validates workflows with actionlint and zizmor. Builds use the pinned `rust-toolchain.toml` and committed lockfile. The `CI gate` job requires every check to succeed and can be selected as a required status check in repository settings.
+[GitHub Actions](.github/workflows/ci.yaml) runs on pull requests and pushes to `main`. CI checks formatting, Clippy, and rustdoc with warnings denied; tests the core and all-features configurations on Linux, macOS, and Windows (including doctests); verifies each feature on the minimum Rust version declared in `Cargo.toml`; audits dependencies with RustSec; and validates workflows with actionlint and zizmor. Builds use the pinned `rust-toolchain.toml` and committed lockfile. The `CI gate` job requires every check to succeed and can be selected as a required status check in repository settings.
 
 ### Independent reference suite
 
@@ -209,9 +195,9 @@ A model evaluator maps a batch of input configurations to model outputs. It may 
 ## Roadmap
 
 1. **Complete:** Implement conventional PRIM for static input/output datasets and establish a correctness test suite against EMA Workbench.
-2. **Complete:** Implement a transport-independent evaluator abstraction, validated model schema, reproducible uniform and Latin-hypercube sampling, sequential and Rayon-parallel in-process workflows, a versioned Arrow request/result contract, and a persistent stdio IPC subprocess transport.
+2. **Complete:** Implement a transport-independent evaluator abstraction, reproducible uniform and Latin-hypercube sampling, sequential and Rayon-parallel in-process workflows, and Graphcal model evaluation through the Graphcal batch model-evaluation protocol.
 3. Implement adaptive scenario discovery with explicit acquisition and stopping rules. Benchmark it against fixed Latin-hypercube sampling on representative problems.
-4. Define the remote HTTP binding over the existing Arrow payload contract, including cancellation and asynchronous execution. Provide a CLI client and reference servers for Rust and Python.
+4. Add remote and asynchronous evaluation, including cancellation, and a CLI client.
 5. Publish a Python package that wraps the Rust core through PyO3 and provides a notebook-friendly API.
 6. Evaluate additional analysis methods, such as CART, robustness metrics, and sensitivity analysis, based on demonstrated user needs.
 

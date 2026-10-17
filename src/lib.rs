@@ -2,15 +2,19 @@
 //! uncertainty.
 //!
 //! The current release implements conventional Patient Rule Induction Method
-//! (PRIM) analysis for static binary input/output datasets, plus a validated
-//! model schema, reproducible uniform and Latin-hypercube samplers,
-//! transport-independent evaluator interface, and sequential and
-//! Rayon-parallel in-process workflows. The optional `arrow` feature adds
-//! validated model-schema, fixed-schema request, and per-row result
-//! interchange; `stdio` adds a persistent Arrow IPC subprocess evaluator. PRIM
-//! supports continuous, integer, and categorical inputs and
-//! returns the complete peeling and pasting trajectory with coverage, density,
-//! mass, and quasi-p diagnostics.
+//! (PRIM) analysis for static binary input/output datasets, plus reproducible
+//! uniform and Latin-hypercube samplers, a transport-independent evaluator
+//! interface, and sequential and Rayon-parallel in-process workflows. PRIM
+//! supports continuous, integer, and categorical inputs and returns the
+//! complete peeling and pasting trajectory with coverage, density, mass, and
+//! quasi-p diagnostics.
+//!
+//! Model schemas, requests, values, and per-row failures use the vocabulary of
+//! the Graphcal batch model-evaluation protocol, re-exported as
+//! [`graphcal_model_protocol`]. Graphcal is the primary model implementation:
+//! the optional `graphcal` feature adds `GraphcalEvaluator`, which drives a
+//! Graphcal model through the re-exported `graphcal_model_client`. Simple Rust
+//! models are declared with [`ModelSchemaBuilder`] and evaluated in process.
 //!
 //! # Example
 //!
@@ -40,28 +44,22 @@
 //! # In-process model evaluation
 //!
 //! ```
+//! use tenax::graphcal_model_protocol::{RowFailure, Value};
 //! use tenax::{
-//!     ChunkingPolicy, Evaluator, InputRow, InputSchema, InputValue, ModelError,
-//!     ModelSchema, OutputSchema, OutputValue, ParallelInProcessEvaluator, RowContext,
-//!     evaluation_to_dataset, sample_uniform,
+//!     ChunkingPolicy, Evaluator, InputRow, ModelSchemaBuilder, ParallelInProcessEvaluator,
+//!     RowContext, evaluation_to_dataset, sample_uniform,
 //! };
 //!
-//! let schema = ModelSchema::new(
-//!     vec![InputSchema::continuous("load", 0.0, 1.0)?],
-//!     vec![OutputSchema::boolean("failure")?],
-//! )?;
-//! let load_position = schema.input_position("load")?;
-//! let failure = schema.output_position("failure")?;
+//! let schema = ModelSchemaBuilder::new()
+//!     .continuous("load", 0.0, 1.0)?
+//!     .boolean_output("failure")?
+//!     .build()?;
+//! let load = schema.input_slot("load").expect("load is an input");
+//! let failure = schema.output_slot("failure").expect("failure is an output");
 //! let evaluator = ParallelInProcessEvaluator::new(
 //!     schema.clone(),
-//!     move |row: InputRow<'_>, _context: RowContext| {
-//!         let InputValue::Continuous(load) = row
-//!             .value(load_position)
-//!             .map_err(|error| ModelError::new(error.to_string()))?
-//!         else {
-//!             return Err(ModelError::new("load must be continuous"));
-//!         };
-//!         Ok(vec![OutputValue::Boolean(load >= 0.7)])
+//!     move |row: InputRow<'_>, _context: RowContext| -> Result<Vec<Value>, RowFailure> {
+//!         Ok(vec![Value::Bool(row.quantity(load)? >= 0.7)])
 //!     },
 //!     ChunkingPolicy::new(64)?,
 //! );
@@ -78,38 +76,37 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-#[cfg(feature = "arrow")]
-pub mod arrow;
 mod data;
 mod error;
 mod evaluation;
+mod evaluation_dataset;
+#[cfg(feature = "graphcal")]
+mod graphcal;
 mod input;
+mod model_schema;
 mod parallel;
 mod prim;
 mod sampling;
-mod schema;
 mod seed;
-#[cfg(feature = "stdio")]
-pub mod stdio;
+
+#[cfg(feature = "graphcal")]
+pub use graphcal_model_client;
+pub use graphcal_model_protocol;
 
 pub use data::{CategoricalView, Dataset, Feature, FeatureKind, FeatureView};
 pub use error::{DataError, PrimError};
 pub use evaluation::{
-    ChunkResult, ChunkResultError, EvalRequest, EvaluationDatasetError, EvaluationId, Evaluator,
-    EvaluatorFailure, EvaluatorFailureKind, InProcessEvaluator, ModelError, ModelPanic, OutputRow,
-    OutputRowError, OutputValue, RowContext, RowFailure, RowOutcome, evaluation_to_dataset,
+    ChunkResult, ChunkResultError, EvalRequest, EvaluationId, Evaluator, InProcessEvaluator,
+    ModelPanic, OutputRow, OutputRowError, RowContext, RowFailure, RowOutcome, SessionMismatch,
 };
-pub use input::{InputAccessError, InputChunk, InputChunkError, InputRow, InputValue};
+pub use evaluation_dataset::{EvaluationDatasetError, evaluation_to_dataset};
+#[cfg(feature = "graphcal")]
+pub use graphcal::GraphcalEvaluator;
+pub use input::{InputAccessError, InputRow, ValueKind};
+pub use model_schema::{ModelSchemaBuilder, ModelSchemaError};
 pub use parallel::{ChunkingPolicy, ChunkingPolicyError, ParallelInProcessEvaluator};
 pub use prim::{
     BoxLimits, BoxStatistics, BoxStep, CategorySet, ContinuousRange, FeatureLimit, IntegerRange,
     Objective, Prim, PrimBox, PrimConfig, PrimPhase, QuasiPValue, Restriction,
 };
 pub use sampling::{SamplingError, sample_latin_hypercube, sample_uniform};
-pub use schema::{
-    CategoricalDomain, ContinuousDomain, FeatureDomain, InputPosition, InputSchema, IntegerDomain,
-    ModelFieldRole, ModelSchema, OutputKind, OutputPosition, OutputSchema, SchemaError,
-    SchemaLookupError,
-};
-#[cfg(feature = "stdio")]
-pub use stdio::{StdioError, StdioEvaluator, StdioServerError, serve_stdio};

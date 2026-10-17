@@ -4,8 +4,8 @@ This example runs Tenax's complete in-process workflow on the Direct Policy Sear
 (DPS) lake problem from the EMA Workbench [open-exploration
 tutorial](https://emaworkbench.readthedocs.io/en/latest/indepth_tutorial/open-exploration.html):
 
-1. declare the five deep uncertainties and five policy levers as a
-   `ModelSchema`;
+1. declare the five deep uncertainties and five policy levers with
+   `ModelSchemaBuilder`;
 2. draw 5,000 deterministic uniform experiments;
 3. evaluate 150 stochastic lake realizations over 100 years for each row with
    the Rayon-backed `ParallelInProcessEvaluator` in fixed 16-row work chunks;
@@ -108,8 +108,9 @@ byte-for-byte reproduction of EMA Workbench's notebook output:
   a full factorial product of 1,000 scenarios and five policies.
 - The current schema does not yet distinguish uncertainties from levers; all
   ten inputs are ordinary typed features for PRIM.
-- Output schemas are currently binary, so `max_P < 0.8` is classified at the
-  evaluator boundary rather than from a retained scalar-output dataframe.
+- PRIM dataset conversion requires a Boolean output, so `max_P < 0.8` is
+  classified at the evaluator boundary rather than from a retained
+  scalar-output dataframe.
 - Each row uses its deterministic `RowContext` seed and a local `ChaCha12` RNG.
   EMA Workbench's Python source uses NumPy's legacy global RNG, so the
   stochastic samples and exact trajectory differ.

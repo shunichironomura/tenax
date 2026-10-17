@@ -4,15 +4,14 @@ use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, mpsc};
 
+use graphcal_model_protocol::{RowFailure as ProtocolRowFailure, SessionSchema, Value};
 use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::evaluation::{
-    ChunkResult, EvalRequest, Evaluator, ModelError, OutputValue, RowContext, RowFailure,
-    RowOutcome, evaluate_model_row,
+    ChunkResult, EvalRequest, Evaluator, RowContext, RowOutcome, evaluate_model_row, rejected_rows,
 };
-use crate::input::{InputChunk, InputRow};
-use crate::schema::ModelSchema;
+use crate::input::InputRow;
 
 /// Errors raised while configuring parallel row chunking.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -81,7 +80,8 @@ impl EvaluationPool {
 /// The model closure is shared across worker threads and must consequently be
 /// `Send + Sync + 'static`. It receives a zero-copy [`InputRow`] and the same
 /// deterministic [`RowContext`] it would receive from the sequential
-/// [`crate::InProcessEvaluator`]. Returned errors, schema-invalid outputs, and
+/// [`crate::InProcessEvaluator`], and request, domain, output, and panic
+/// handling are identical. Returned failures, schema-invalid outputs, and
 /// unwinding panics affect only their own rows. Panics compiled with
 /// `panic = "abort"` cannot be caught.
 ///
@@ -89,7 +89,7 @@ impl EvaluationPool {
 /// avoid order-dependent shared state and ambient randomness, deriving any
 /// stochastic stream from [`RowContext::seed`] instead.
 pub struct ParallelInProcessEvaluator<F> {
-    schema: Arc<ModelSchema>,
+    schema: Arc<SessionSchema>,
     model: Arc<F>,
     chunking: ChunkingPolicy,
     pool: EvaluationPool,
@@ -98,9 +98,9 @@ pub struct ParallelInProcessEvaluator<F> {
 impl<F> ParallelInProcessEvaluator<F> {
     /// Constructs a parallel evaluator using Rayon's global thread pool.
     #[must_use]
-    pub fn new(schema: ModelSchema, model: F, chunking: ChunkingPolicy) -> Self {
+    pub fn new(schema: Arc<SessionSchema>, model: F, chunking: ChunkingPolicy) -> Self {
         Self {
-            schema: Arc::new(schema),
+            schema,
             model: Arc::new(model),
             chunking,
             pool: EvaluationPool::Global,
@@ -109,13 +109,13 @@ impl<F> ParallelInProcessEvaluator<F> {
 
     #[cfg(test)]
     fn with_pool(
-        schema: ModelSchema,
+        schema: Arc<SessionSchema>,
         model: F,
         chunking: ChunkingPolicy,
         pool: rayon::ThreadPool,
     ) -> Self {
         Self {
-            schema: Arc::new(schema),
+            schema,
             model: Arc::new(model),
             chunking,
             pool: EvaluationPool::Dedicated(Arc::new(pool)),
@@ -125,14 +125,14 @@ impl<F> ParallelInProcessEvaluator<F> {
 
 impl<F> Evaluator for ParallelInProcessEvaluator<F>
 where
-    F: for<'data> Fn(InputRow<'data>, RowContext) -> Result<Vec<OutputValue>, ModelError>
+    F: for<'data> Fn(InputRow<'data>, RowContext) -> Result<Vec<Value>, ProtocolRowFailure>
         + Send
         + Sync
         + 'static,
 {
     type Error = Infallible;
 
-    fn schema(&self) -> &ModelSchema {
+    fn schema(&self) -> &Arc<SessionSchema> {
         &self.schema
     }
 
@@ -147,7 +147,7 @@ where
             let sender = sender.clone();
             let chunking = self.chunking;
             self.pool.spawn(move || {
-                let result = evaluate_request(&schema, model.as_ref(), request, chunking);
+                let result = evaluate_request(&schema, model.as_ref(), &request, chunking);
                 drop(sender.send(result));
             });
         }
@@ -157,30 +157,30 @@ where
 }
 
 fn evaluate_request<F>(
-    schema: &ModelSchema,
+    schema: &Arc<SessionSchema>,
     model: &F,
-    request: EvalRequest,
+    request: &EvalRequest,
     chunking: ChunkingPolicy,
 ) -> ChunkResult
 where
-    F: for<'data> Fn(InputRow<'data>, RowContext) -> Result<Vec<OutputValue>, ModelError>
+    F: for<'data> Fn(InputRow<'data>, RowContext) -> Result<Vec<Value>, ProtocolRowFailure>
         + Send
         + Sync,
 {
     let id = request.id();
     let seed = request.seed();
-    let inputs: InputChunk = request.into_inputs();
-    let rows = match inputs.validate_against(schema) {
+    let inputs = request.inputs();
+    let rows = match request.validate_against(schema) {
         Ok(()) => {
             // `fold_chunks` remains indexed, so collection restores chunk and
             // row order regardless of the workers' completion order.
-            (0..inputs.row_count())
+            (0..inputs.rows())
                 .into_par_iter()
                 .fold_chunks(
                     chunking.rows_per_chunk(),
                     Vec::new,
                     |mut outcomes, row_index| {
-                        let row = inputs.row_in_bounds(row_index);
+                        let row = InputRow::in_bounds(inputs, row_index);
                         let context = RowContext::new(id, seed, row_index);
                         outcomes.push(evaluate_model_row(schema, model, row, context));
                         outcomes
@@ -191,9 +191,7 @@ where
                 .flatten()
                 .collect()
         }
-        Err(error) => (0..inputs.row_count())
-            .map(|_| RowOutcome::Failure(RowFailure::InvalidInput(error.clone())))
-            .collect(),
+        Err(mismatch) => rejected_rows(request, mismatch),
     };
     ChunkResult::from_rows(id, rows)
 }
@@ -203,30 +201,35 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
+    use graphcal_model_protocol::{InputColumn, RequestBatch};
     use rayon::ThreadPoolBuilder;
 
     use super::*;
-    use crate::{
-        EvaluationId, Feature, InputSchema, InputValue, ModelPanic, OutputRow, OutputSchema,
-    };
+    use crate::{EvaluationId, ModelPanic, ModelSchemaBuilder, OutputRow, RowFailure};
 
-    fn schema() -> ModelSchema {
-        ModelSchema::new(
-            vec![InputSchema::integer("x", 0, 3).unwrap()],
-            vec![OutputSchema::boolean("is_even").unwrap()],
-        )
-        .unwrap()
+    fn schema() -> Arc<SessionSchema> {
+        ModelSchemaBuilder::new()
+            .integer("x", 0, 3)
+            .unwrap()
+            .boolean_output("is_even")
+            .unwrap()
+            .build()
+            .unwrap()
     }
 
     fn request(id: u128, values: Vec<i64>) -> EvalRequest {
-        let schema = schema();
-        let inputs =
-            InputChunk::new(&schema, vec![Feature::integer("x", values).unwrap()]).unwrap();
+        let inputs = RequestBatch::new(schema(), vec![InputColumn::Int(values)]).unwrap();
         EvalRequest::new(EvaluationId::new(id), 17, inputs)
     }
 
     fn two_thread_pool() -> rayon::ThreadPool {
         ThreadPoolBuilder::new().num_threads(2).build().unwrap()
+    }
+
+    fn evaluation_error(message: &str) -> ProtocolRowFailure {
+        ProtocolRowFailure::EvaluationError {
+            message: message.to_owned(),
+        }
     }
 
     #[test]
@@ -240,9 +243,8 @@ mod tests {
 
     #[test]
     fn chunking_does_not_change_row_contexts_or_result_order() {
-        let model = |_: InputRow<'_>, context: RowContext| {
-            Ok(vec![OutputValue::Boolean(context.seed() & 1 == 0)])
-        };
+        let model =
+            |_: InputRow<'_>, context: RowContext| Ok(vec![Value::Bool(context.seed() & 1 == 0)]);
         let fine =
             ParallelInProcessEvaluator::new(schema(), model, ChunkingPolicy::new(1).unwrap());
         let coarse =
@@ -279,10 +281,10 @@ mod tests {
                     let timed_out = timeout.timed_out() && !*released;
                     drop(released);
                     if timed_out {
-                        return Err(ModelError::new("test release gate timed out"));
+                        return Err(evaluation_error("test release gate timed out"));
                     }
                 }
-                Ok(vec![OutputValue::Boolean(true)])
+                Ok(vec![Value::Bool(true)])
             },
             ChunkingPolicy::new(1).unwrap(),
             two_thread_pool(),
@@ -302,21 +304,13 @@ mod tests {
     #[test]
     fn erroring_and_panicking_rows_are_failure_data_without_reordering_rows() {
         let schema = schema();
-        let x = schema.input_position("x").unwrap();
+        let x = schema.input_slot("x").unwrap();
         let evaluator = ParallelInProcessEvaluator::with_pool(
-            schema,
-            move |row: InputRow<'_>, _| {
-                let InputValue::Integer(value) = row
-                    .value(x)
-                    .map_err(|error| ModelError::new(error.to_string()))?
-                else {
-                    return Err(ModelError::new("x must be an integer"));
-                };
-                match value {
-                    1 => Err(ModelError::new("model rejected row")),
-                    2 => panic!("model panicked on row"),
-                    _ => Ok(vec![OutputValue::Boolean(value % 2 == 0)]),
-                }
+            Arc::clone(&schema),
+            move |row: InputRow<'_>, _| match row.int(x)? {
+                1 => Err(evaluation_error("model rejected row")),
+                2 => panic!("model panicked on row"),
+                value => Ok(vec![Value::Bool(value % 2 == 0)]),
             },
             ChunkingPolicy::new(1).unwrap(),
             two_thread_pool(),
@@ -329,14 +323,12 @@ mod tests {
 
         assert_eq!(
             result.rows()[0],
-            RowOutcome::Success(
-                OutputRow::new(evaluator.schema(), vec![OutputValue::Boolean(true)]).unwrap()
-            )
+            RowOutcome::Success(OutputRow::new(&schema, vec![Value::Bool(true)]).unwrap())
         );
         assert!(matches!(
             &result.rows()[1],
-            RowOutcome::Failure(RowFailure::Model(error))
-                if error.message() == "model rejected row"
+            RowOutcome::Failure(RowFailure::Model(failure))
+                if failure.message() == "model rejected row"
         ));
         assert!(matches!(
             &result.rows()[2],
@@ -345,9 +337,7 @@ mod tests {
         ));
         assert_eq!(
             result.rows()[3],
-            RowOutcome::Success(
-                OutputRow::new(evaluator.schema(), vec![OutputValue::Boolean(false)]).unwrap()
-            )
+            RowOutcome::Success(OutputRow::new(&schema, vec![Value::Bool(false)]).unwrap())
         );
     }
 }

@@ -2,6 +2,19 @@
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["config:best-practices", "helpers:pinGitHubActionDigestsToSemver"],
   minimumReleaseAge: "7 days",
+  customManagers: [
+    {
+      customType: "regex",
+      description: "Track the Graphcal CLI version installed by setup-graphcal",
+      managerFilePatterns: ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      matchStrings: [
+        "uses: graphcal-lang/setup-graphcal@[^\\n]*\\n\\s*with:\\n\\s*version: (?<currentValue>[^\\s]+)",
+      ],
+      depNameTemplate: "graphcal",
+      datasourceTemplate: "crate",
+      versioningTemplate: "semver",
+    },
+  ],
   lockFileMaintenance: {
     enabled: true,
   },
@@ -15,6 +28,15 @@
       description: "Disable Renovate cooldown for Cargo crates until Cargo min-publish-age is stable",
       matchManagers: ["cargo"],
       matchDatasources: ["crate"],
+      minimumReleaseAge: null,
+    },
+    {
+      // The CLI used by the end-to-end CI job must match the client crate.
+      description: "Bump the Graphcal crates and the CI's Graphcal CLI together",
+      matchPackageNames: ["graphcal", "graphcal-model-client", "graphcal-model-protocol"],
+      groupName: "graphcal",
+      groupSingleUpdates: true,
+      // Same cooldown as the Cargo crates, so the group is not split.
       minimumReleaseAge: null,
     },
     {
