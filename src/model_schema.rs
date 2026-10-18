@@ -10,10 +10,10 @@
 use std::sync::Arc;
 
 use graphcal_model_protocol::{
-    Bounds, BoundsError, CanonicalUnitsOnly, DatetimeType, Dimension, Domain, FiniteF64, IndexName,
-    InterfaceError, KeyType, KeyTypeError, LabelError, ModelInterface, NonFiniteError,
-    OutputDescription, ParameterDescription, PortName, PortWire, QuantityType, SessionError,
-    SessionSchema, SessionSpec, VariantName, WireType,
+    Axis, AxisError, AxisKind, Bounds, BoundsError, CanonicalUnitsOnly, DatetimeType, Dimension,
+    Domain, FiniteF64, IndexName, InterfaceError, KeyType, LabelError, ModelInterface,
+    NonFiniteError, OutputDescription, ParameterDescription, PortName, PortWire, QuantityType,
+    SessionError, SessionSchema, SessionSpec, VariantName, WireType,
 };
 use thiserror::Error;
 
@@ -48,7 +48,7 @@ pub enum ModelSchemaError {
         /// The port carrying the invalid key type.
         name: PortName,
         /// Why the variant list is invalid.
-        source: KeyTypeError,
+        source: AxisError,
     },
 
     /// Two inputs or two outputs share a name.
@@ -345,10 +345,12 @@ where
         .into_iter()
         .map(VariantName::new)
         .collect::<Result<Vec<_>, _>>()?;
-    KeyType::new(index, variants).map_err(|source| ModelSchemaError::InvalidKey {
-        name: name.clone(),
-        source,
-    })
+    Axis::new(index, AxisKind::Named { variants })
+        .map(KeyType::new)
+        .map_err(|source| ModelSchemaError::InvalidKey {
+            name: name.clone(),
+            source,
+        })
 }
 
 #[expect(
@@ -386,7 +388,7 @@ fn type_spelling(wire: &WireType) -> String {
             .join(" * "),
         WireType::Int => "Int".to_owned(),
         WireType::Bool => "Bool".to_owned(),
-        WireType::Key(key) => format!("Key<{}>", key.index()),
+        WireType::Key(key) => format!("Key<{}>", key.axis().index()),
         WireType::Complex(quantity) => format!(
             "Complex<{}>",
             type_spelling(&WireType::Quantity(quantity.clone()))
@@ -444,7 +446,10 @@ mod tests {
         let WireType::Key(mode) = schema.inputs()[2].wire() else {
             panic!("mode must be a key input");
         };
-        assert_eq!(mode.variants()[0].as_str(), "safe");
+        assert!(matches!(
+            mode.axis().kind(),
+            AxisKind::Named { variants } if variants[0].as_str() == "safe"
+        ));
         assert_eq!(schema.inputs()[3].domain(), None);
         assert_eq!(schema.outputs()[1].wire(), &WireType::Int);
     }
@@ -495,14 +500,14 @@ mod tests {
         assert!(matches!(
             ModelSchemaBuilder::new().categorical("mode", "Mode", ["a", "a"]),
             Err(ModelSchemaError::InvalidKey {
-                source: KeyTypeError::DuplicateVariant { .. },
+                source: AxisError::DuplicateVariant { .. },
                 ..
             })
         ));
         assert!(matches!(
             ModelSchemaBuilder::new().categorical("mode", "Mode", Vec::<String>::new()),
             Err(ModelSchemaError::InvalidKey {
-                source: KeyTypeError::Empty { .. },
+                source: AxisError::Empty { .. },
                 ..
             })
         ));

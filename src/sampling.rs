@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use graphcal_model_protocol::{
-    Domain, FiniteF64, InputColumn, KeyType, PortName, RequestBatch, RequestBatchError,
-    SessionInput, SessionSchema, VariantPosition, WireType,
+    Domain, FiniteF64, InputColumn, KeyPosition, KeyType, PortName, RequestBatch,
+    RequestBatchError, SessionInput, SessionSchema, WireType,
 };
 use rand::SeedableRng;
 use rand::distr::{Distribution, StandardUniform, Uniform};
@@ -161,7 +161,7 @@ fn uniform_column(
             ))
         }
         WireType::Key(key) => {
-            let positions = variant_positions(key);
+            let positions = key_positions(key);
             let distribution = Uniform::try_from(0..positions.len()).map_err(|_| unsampleable())?;
             Ok(InputColumn::Key(
                 (0..row_count)
@@ -288,7 +288,7 @@ fn latin_hypercube_column(
             Ok(InputColumn::Int(values))
         }
         WireType::Key(key) => {
-            let positions = variant_positions(key);
+            let positions = key_positions(key);
             let values = discrete_levels(&positions, row_count, rng).ok_or_else(unsampleable)?;
             Ok(InputColumn::Key(values))
         }
@@ -379,8 +379,8 @@ fn unbounded(input: &SessionInput) -> SamplingError {
     }
 }
 
-fn variant_positions(key: &KeyType) -> Vec<VariantPosition> {
-    key.entries().map(|(position, _)| position).collect()
+fn key_positions(key: &KeyType) -> Vec<KeyPosition> {
+    key.positions().collect()
 }
 
 fn sampled_request(
@@ -417,7 +417,7 @@ const fn exact_u64_as_f64(value: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use graphcal_model_protocol::{Bounds, Dimension, QuantityType, ValueRef};
+    use graphcal_model_protocol::{Bounds, Dimension, KeyRef, QuantityType, ValueRef};
 
     use super::*;
     use crate::ModelSchemaBuilder;
@@ -454,7 +454,7 @@ mod tests {
         let slot = request.inputs().schema().input_slot(name).unwrap();
         (0..request.inputs().rows())
             .map(|row| match request.inputs().value(slot, row) {
-                Some(ValueRef::Key(variant)) => variant.as_str().to_owned(),
+                Some(ValueRef::Key(KeyRef::Variant(variant))) => variant.as_str().to_owned(),
                 _ => panic!("wrong sampled column kind"),
             })
             .collect()

@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 A simple Rust model declares its inputs and outputs with `ModelSchemaBuilder` and runs as a closure. It reads typed values from a zero-copy `InputRow` and returns one protocol `Value` per output, or a protocol `RowFailure` (a failed assertion, an out-of-domain input, or another evaluation error): the same per-row vocabulary a Graphcal model uses.
 
 ```rust
-use tenax::graphcal_model_protocol::{RowFailure, Value};
+use tenax::graphcal_model_protocol::{KeyRef, RowFailure, Value};
 use tenax::{
     ChunkingPolicy, Evaluator, InputRow, ModelSchemaBuilder, ParallelInProcessEvaluator,
     RowContext, evaluation_to_dataset, sample_uniform,
@@ -80,7 +80,8 @@ let failure = schema.output_slot("failure").expect("failure is an output");
 let evaluator = ParallelInProcessEvaluator::new(
     schema.clone(),
     move |row: InputRow<'_>, _context: RowContext| -> Result<Vec<Value>, RowFailure> {
-        let fragile = row.key(regime)?.as_str() == "fragile";
+        let fragile =
+            matches!(row.key(regime)?, KeyRef::Variant(variant) if variant.as_str() == "fragile");
         Ok(vec![Value::Bool(fragile && row.quantity(load)? >= 0.7)])
     },
     ChunkingPolicy::new(64)?,
@@ -126,7 +127,7 @@ let dataset = evaluation_to_dataset(&schema, retained_request, result, failure)?
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Graphcal models are deterministic, so the request seed is not sent to the server. Quantities are sampled and analyzed in their wire units, and samplers require both domain bounds of every varied quantity, datetime, and integer parameter. Datetimes are sampled as seconds since J2000 in their time scale; complex, indexed, and algebraic parameters cannot be sampled and are rejected. The integration test runs Latin-hypercube sample → `graphcal model serve` → PRIM against a real `graphcal` executable:
+Graphcal models are deterministic, so the request seed is not sent to the server. Quantities are sampled and analyzed in their wire units, and samplers require both domain bounds of every varied quantity, datetime, and integer parameter. Datetimes are sampled as seconds since J2000 in their time scale. Keys are sampled as categories over every entry of their index, whether named, `Fin(N)`, or coordinate; PRIM labels them by variant name, position, or SI coordinate. Complex, indexed, and algebraic parameters cannot be sampled and are rejected. The integration test runs Latin-hypercube sample → `graphcal model serve` → PRIM against a real `graphcal` executable:
 
 ```console
 GRAPHCAL_BIN=/path/to/graphcal cargo test --features graphcal --test graphcal_workflow -- --ignored
