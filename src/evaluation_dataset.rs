@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use graphcal_model_protocol::{
-    InputColumn, OutputSlot, PortName, SessionInput, SessionSchema, Value, VariantName, WireType,
+    InputColumn, KeyRef, KeyType, OutputSlot, PortName, SessionInput, SessionSchema, Value,
+    WireType,
 };
 use thiserror::Error;
 
@@ -175,9 +176,20 @@ pub fn evaluation_to_dataset(
 fn input_feature(input: &SessionInput, column: &InputColumn) -> Result<Feature, DataError> {
     let name = input.name().as_str();
     match (column, input.wire()) {
-        (InputColumn::Quantity(values), _) => {
+        (InputColumn::Quantity(values) | InputColumn::Datetime(values), _) => {
             Feature::continuous(name, values.iter().map(|value| value.get()).collect())
         }
+        (InputColumn::Complex(_), _) => Err(DataError::UnsupportedFeature {
+            name: name.to_owned(),
+            kind: "complex",
+        }),
+        (InputColumn::Structured(_), wire) => Err(DataError::UnsupportedFeature {
+            name: name.to_owned(),
+            kind: match wire {
+                WireType::Indexed(_) => "indexed",
+                _ => "algebraic",
+            },
+        }),
         (InputColumn::Int(values), _) => Feature::integer(name, values.clone()),
         (InputColumn::Bool(values), _) => Feature::categorical_from_dictionary(
             name,
@@ -188,29 +200,35 @@ fn input_feature(input: &SessionInput, column: &InputColumn) -> Result<Feature, 
             // A validated request batch pairs every key column with a key
             // input; any other pairing yields no dictionary and is rejected by
             // the dictionary encoder below.
-            let variants: &[VariantName] = match wire {
-                WireType::Key(key) => key.variants(),
-                _ => &[],
+            let labels = match wire {
+                WireType::Key(key) => key_labels(key),
+                _ => Vec::new(),
             };
             let codes = positions
                 .iter()
                 .map(|position| {
                     i32::try_from(position.get()).map_err(|_| DataError::TooManyCategories {
                         name: name.to_owned(),
-                        count: variants.len(),
+                        count: labels.len(),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Feature::categorical_from_dictionary(
-                name,
-                codes,
-                variants
-                    .iter()
-                    .map(|variant| variant.as_str().to_owned())
-                    .collect(),
-            )
+            Feature::categorical_from_dictionary(name, codes, labels)
         }
     }
+}
+
+/// The category label of every entry of `key`, in axis order: the variant
+/// name, the `Fin` position, or the coordinate in its SI unit.
+fn key_labels(key: &KeyType) -> Vec<String> {
+    key.positions()
+        .filter_map(|position| key.key(position))
+        .map(|entry| match entry {
+            KeyRef::Variant(variant) => variant.as_str().to_owned(),
+            KeyRef::Position(position) => position.to_string(),
+            KeyRef::Coordinate(coordinate) => coordinate.get().to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -221,6 +239,32 @@ mod tests {
     use crate::{
         Evaluator, FeatureView, InProcessEvaluator, InputRow, ModelSchemaBuilder, RowContext,
     };
+
+    #[test]
+    fn key_labels_name_fin_positions_and_coordinates() {
+        use graphcal_model_protocol::{Axis, AxisKind, Dimension, IndexName};
+
+        let key = |index: &str, kind| {
+            KeyType::new(Axis::new(IndexName::new(index).unwrap(), kind).unwrap())
+        };
+        assert_eq!(
+            key_labels(&key("Fin(3)", AxisKind::Finite { size: 3 })),
+            ["0", "1", "2"]
+        );
+        let coordinates = [0.0, 0.5]
+            .map(|coordinate| FiniteF64::new(coordinate).unwrap())
+            .to_vec();
+        assert_eq!(
+            key_labels(&key(
+                "Step",
+                AxisKind::Coordinate {
+                    dimension: Dimension::dimensionless(),
+                    coordinates,
+                }
+            )),
+            ["0", "0.5"]
+        );
+    }
 
     fn schema() -> Arc<SessionSchema> {
         ModelSchemaBuilder::new()
@@ -244,8 +288,11 @@ mod tests {
         let WireType::Key(mode) = schema.inputs()[2].wire() else {
             panic!("mode must be a key input");
         };
-        let safe = mode.position("safe").unwrap();
-        let risky = mode.position("risky").unwrap();
+        let variant = |name: &str| {
+            let variant = graphcal_model_protocol::VariantName::new(name).unwrap();
+            mode.position(KeyRef::Variant(&variant)).unwrap()
+        };
+        let (safe, risky) = (variant("safe"), variant("risky"));
         let inputs = RequestBatch::new(
             Arc::clone(schema),
             vec![
@@ -369,6 +416,43 @@ mod tests {
         assert!(matches!(
             evaluation_to_dataset(&schema, other, result, failure),
             Err(EvaluationDatasetError::MismatchedId { .. })
+        ));
+    }
+
+    #[test]
+    fn datetime_inputs_are_continuous_features_and_complex_inputs_are_rejected() {
+        let finite = |value| FiniteF64::new(value).unwrap();
+        let datetime = ModelSchemaBuilder::new()
+            .datetime(
+                "launch",
+                graphcal_model_protocol::DatetimeType::new(graphcal_model_protocol::TimeScale::Utc),
+                graphcal_model_protocol::Bounds::new(Some(finite(0.0)), Some(finite(10.0)))
+                    .unwrap(),
+            )
+            .unwrap()
+            .boolean_output("failure")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            input_feature(
+                &datetime.inputs()[0],
+                &InputColumn::Datetime(vec![finite(1.0), finite(2.0)])
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            input_feature(
+                &datetime.inputs()[0],
+                &InputColumn::Complex(vec![graphcal_model_protocol::ComplexValue {
+                    re: finite(1.0),
+                    im: finite(0.0),
+                }])
+            ),
+            Err(DataError::UnsupportedFeature {
+                kind: "complex",
+                ..
+            })
         ));
     }
 }

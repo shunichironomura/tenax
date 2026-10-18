@@ -3,8 +3,8 @@
 use std::fmt;
 
 use graphcal_model_protocol::{
-    Bounds, Domain, InputColumn, InputSlot, PortName, RequestBatch,
-    RowFailure as ProtocolRowFailure, ValueRef, VariantName,
+    Bounds, Domain, InputColumn, InputSlot, KeyRef, PortName, RequestBatch,
+    RowFailure as ProtocolRowFailure, ValueRef,
 };
 use thiserror::Error;
 
@@ -19,6 +19,14 @@ pub enum ValueKind {
     Bool,
     /// A categorical key variant.
     Key,
+    /// A complex quantity.
+    Complex,
+    /// A datetime, as seconds since J2000.
+    Datetime,
+    /// An indexed value.
+    Indexed,
+    /// A record or tagged union.
+    Algebraic,
 }
 
 impl ValueKind {
@@ -30,6 +38,10 @@ impl ValueKind {
             ValueRef::Int(_) => Self::Int,
             ValueRef::Bool(_) => Self::Bool,
             ValueRef::Key(_) => Self::Key,
+            ValueRef::Complex(_) => Self::Complex,
+            ValueRef::Datetime(_) => Self::Datetime,
+            ValueRef::Indexed(_) => Self::Indexed,
+            ValueRef::Algebraic { .. } => Self::Algebraic,
         }
     }
 }
@@ -41,6 +53,10 @@ impl fmt::Display for ValueKind {
             Self::Int => "integer",
             Self::Bool => "Boolean",
             Self::Key => "key",
+            Self::Complex => "complex",
+            Self::Datetime => "datetime",
+            Self::Indexed => "indexed",
+            Self::Algebraic => "algebraic",
         })
     }
 }
@@ -187,14 +203,15 @@ impl<'a> InputRow<'a> {
         }
     }
 
-    /// Returns the categorical variant at `slot`.
+    /// Returns the key at `slot`: a variant name, a `Fin` position, or an SI
+    /// coordinate, depending on the key's index.
     ///
     /// # Errors
     ///
     /// Returns [`InputAccessError`] for an unknown slot or a non-key input.
-    pub fn key(&self, slot: InputSlot) -> Result<&'a VariantName, InputAccessError> {
+    pub fn key(&self, slot: InputSlot) -> Result<KeyRef<'a>, InputAccessError> {
         match self.value(slot)? {
-            ValueRef::Key(variant) => Ok(variant),
+            ValueRef::Key(key) => Ok(key),
             value => Err(self.mismatch(slot, ValueKind::Key, &value)),
         }
     }
@@ -265,7 +282,9 @@ fn violation<T: PartialOrd + fmt::Display>(bounds: &Bounds<T>, value: &T) -> Opt
 mod tests {
     use std::sync::Arc;
 
-    use graphcal_model_protocol::{FiniteF64, SessionSchema, VariantPosition, WireType};
+    use graphcal_model_protocol::{
+        FiniteF64, KeyPosition, KeyRef, SessionSchema, VariantName, WireType,
+    };
 
     use super::*;
     use crate::ModelSchemaBuilder;
@@ -288,7 +307,8 @@ mod tests {
         let WireType::Key(mode) = schema.inputs()[1].wire() else {
             panic!("mode must be a key input");
         };
-        let risky: VariantPosition = mode.position("risky").unwrap();
+        let risky = VariantName::new("risky").unwrap();
+        let risky: KeyPosition = mode.position(KeyRef::Variant(&risky)).unwrap();
         RequestBatch::new(
             Arc::clone(schema),
             vec![
@@ -309,7 +329,10 @@ mod tests {
         let batch = batch(&schema, 0.25, 2);
         let row = InputRow::new(&batch, 0).unwrap();
         assert_eq!(row.quantity(x), Ok(0.25));
-        assert_eq!(row.key(mode).unwrap().as_str(), "risky");
+        assert!(matches!(
+            row.key(mode).unwrap(),
+            KeyRef::Variant(variant) if variant.as_str() == "risky"
+        ));
         assert_eq!(row.int(n), Ok(2));
         assert_eq!(InputRow::all(&batch).len(), 1);
     }

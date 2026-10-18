@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tenax::graphcal_model_protocol::{InputSlot, RowFailure, SessionSchema, Value};
+use tenax::graphcal_model_protocol::{InputSlot, KeyRef, RowFailure, SessionSchema, Value};
 use tenax::{
     ChunkingPolicy, EvalRequest, Evaluator, InputRow, ModelSchemaBuilder, ModelSchemaError,
     Objective, ParallelInProcessEvaluator, Prim, PrimConfig, Restriction, RowContext,
@@ -24,10 +24,9 @@ fn evaluate_toy_model(
     regime: InputSlot,
 ) -> Result<Vec<Value>, RowFailure> {
     let load = row.quantity(load)?;
-    let regime = row.key(regime)?;
-    Ok(vec![Value::Bool(
-        load >= 0.7 && regime.as_str() == "fragile",
-    )])
+    let fragile =
+        matches!(row.key(regime)?, KeyRef::Variant(variant) if variant.as_str() == "fragile");
+    Ok(vec![Value::Bool(load >= 0.7 && fragile)])
 }
 
 #[test]

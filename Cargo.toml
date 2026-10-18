@@ -21,8 +21,8 @@ path = "tests/graphcal_workflow.rs"
 required-features = ["graphcal"]
 
 [dependencies]
-graphcal-model-client = { version = "=0.0.1-alpha.38", optional = true }
-graphcal-model-protocol = "=0.0.1-alpha.38"
+graphcal-model-client = { version = "=0.0.1-alpha.39", optional = true }
+graphcal-model-protocol = "=0.0.1-alpha.39"
 rand = { version = "0.10.2", default-features = false, features = ["std"] }
 rand_chacha = "0.10.0"
 rayon = "1.12.0"

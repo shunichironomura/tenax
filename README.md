@@ -12,7 +12,7 @@ The initial algorithmic focus is the Patient Rule Induction Method (PRIM). Addit
 
 Tenax currently provides a complete path from a Graphcal model or an in-process Rust model to scenario discovery:
 
-- Model schemas, requests, values, and per-row failures in the vocabulary of the [Graphcal](https://github.com/graphcal-lang/graphcal) batch model-evaluation protocol: unit-aware quantity, integer, Boolean, and categorical key inputs and outputs with declared domains.
+- Model schemas, requests, values, and per-row failures in the vocabulary of the [Graphcal](https://github.com/graphcal-lang/graphcal) batch model-evaluation protocol: unit-aware quantity, integer, Boolean, categorical key, and datetime inputs and outputs with declared domains.
 - A typed `ModelSchemaBuilder` that declares the session schema of a simple Rust model.
 - Deterministic seeded uniform and mixed-domain Latin-hypercube sampling with stable evaluation IDs and explicit model seeds.
 - A synchronous, transport-independent, batch-in/result-stream-out `Evaluator` trait that separates per-row failures from evaluator/process failures.
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 A simple Rust model declares its inputs and outputs with `ModelSchemaBuilder` and runs as a closure. It reads typed values from a zero-copy `InputRow` and returns one protocol `Value` per output, or a protocol `RowFailure` (a failed assertion, an out-of-domain input, or another evaluation error): the same per-row vocabulary a Graphcal model uses.
 
 ```rust
-use tenax::graphcal_model_protocol::{RowFailure, Value};
+use tenax::graphcal_model_protocol::{KeyRef, RowFailure, Value};
 use tenax::{
     ChunkingPolicy, Evaluator, InputRow, ModelSchemaBuilder, ParallelInProcessEvaluator,
     RowContext, evaluation_to_dataset, sample_uniform,
@@ -80,7 +80,8 @@ let failure = schema.output_slot("failure").expect("failure is an output");
 let evaluator = ParallelInProcessEvaluator::new(
     schema.clone(),
     move |row: InputRow<'_>, _context: RowContext| -> Result<Vec<Value>, RowFailure> {
-        let fragile = row.key(regime)?.as_str() == "fragile";
+        let fragile =
+            matches!(row.key(regime)?, KeyRef::Variant(variant) if variant.as_str() == "fragile");
         Ok(vec![Value::Bool(fragile && row.quantity(load)? >= 0.7)])
     },
     ChunkingPolicy::new(64)?,
@@ -126,7 +127,7 @@ let dataset = evaluation_to_dataset(&schema, retained_request, result, failure)?
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Graphcal models are deterministic, so the request seed is not sent to the server. Quantities are sampled and analyzed in their wire units, and samplers require both domain bounds of every varied quantity and integer parameter. The integration test runs Latin-hypercube sample → `graphcal model serve` → PRIM against a real `graphcal` executable:
+Graphcal models are deterministic, so the request seed is not sent to the server. Quantities are sampled and analyzed in their wire units, and samplers require both domain bounds of every varied quantity, datetime, and integer parameter. Datetimes are sampled as seconds since J2000 in their time scale. Keys are sampled as categories over every entry of their index, whether named, `Fin(N)`, or coordinate; PRIM labels them by variant name, position, or SI coordinate. Complex, indexed, and algebraic parameters cannot be sampled and are rejected. The integration test runs Latin-hypercube sample → `graphcal model serve` → PRIM against a real `graphcal` executable:
 
 ```console
 GRAPHCAL_BIN=/path/to/graphcal cargo test --features graphcal --test graphcal_workflow -- --ignored
@@ -134,7 +135,7 @@ GRAPHCAL_BIN=/path/to/graphcal cargo test --features graphcal --test graphcal_wo
 
 ### Sampling
 
-`sample_uniform` draws each input independently. `sample_latin_hypercube` places exactly one quantity sample in each equal-probability stratum and uses independently permuted midpoint inverse-CDF strata for integer, key, and Boolean inputs. The discrete construction remains balanced when rows outnumber available values. Both methods derive input streams, request IDs, and model seeds deterministically from the run seed and request sequence.
+`sample_uniform` draws each input independently. `sample_latin_hypercube` places exactly one quantity or datetime sample in each equal-probability stratum and uses independently permuted midpoint inverse-CDF strata for integer, key, and Boolean inputs. The discrete construction remains balanced when rows outnumber available values. Both methods derive input streams, request IDs, and model seeds deterministically from the run seed and request sequence.
 
 ### Lake model workflow example
 
