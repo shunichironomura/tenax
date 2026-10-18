@@ -348,9 +348,9 @@ dependencies = [
 
 [[package]]
 name = "graphcal-model-client"
-version = "0.0.1-alpha.38"
+version = "0.0.1-alpha.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d587d58b5a9f9d156f73951c36c1b5e91515d67bc08f14858ee5ef1063920f65"
+checksum = "a77ad43335277ff4324d13ba10be379ecdc78f56b0dbe0acf710fb04777fe138"
 dependencies = [
  "arrow-ipc",
  "arrow-schema",
@@ -361,9 +361,9 @@ dependencies = [
 
 [[package]]
 name = "graphcal-model-protocol"
-version = "0.0.1-alpha.38"
+version = "0.0.1-alpha.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ab0d790f6d889ba2d11e7719c6d46f6da0d76679f41fd20ee14cf5742a4bb84"
+checksum = "44eb72dbd267fe704f9cb4e44ab3ee850d326c7617bce84d54f345b0107aabac"
 dependencies = [
  "arrow-array",
  "arrow-schema",
