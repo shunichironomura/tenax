@@ -10,10 +10,10 @@
 use std::sync::Arc;
 
 use graphcal_model_protocol::{
-    Bounds, BoundsError, Dimension, Domain, FiniteF64, IndexName, InterfaceError, KeyType,
-    KeyTypeError, LabelError, ModelInterface, NonFiniteError, OutputDescription,
-    ParameterDescription, PortName, PortWire, QuantityType, SessionError, SessionSchema,
-    SessionSpec, VariantName, WireType,
+    Bounds, BoundsError, CanonicalUnitsOnly, Dimension, Domain, FiniteF64, IndexName,
+    InterfaceError, KeyType, KeyTypeError, LabelError, ModelInterface, NonFiniteError,
+    OutputDescription, ParameterDescription, PortName, PortWire, QuantityType, SessionError,
+    SessionSchema, SessionSpec, VariantName, WireType,
 };
 use thiserror::Error;
 
@@ -278,7 +278,7 @@ impl ModelSchemaBuilder {
                 .collect(),
         );
         let interface = ModelInterface::new(self.parameters, self.outputs)?;
-        Ok(Arc::new(interface.configure(&spec)?))
+        Ok(Arc::new(interface.configure(&spec, CanonicalUnitsOnly)?))
     }
 
     fn quantity_port(
