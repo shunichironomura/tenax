@@ -76,6 +76,16 @@ pub enum SamplingError {
         name: PortName,
     },
 
+    /// The input's type has no sampling interval or set of levels: a complex,
+    /// indexed, or algebraic value.
+    #[error("input '{name}' is a {kind} value, which the samplers cannot draw")]
+    UnsupportedInput {
+        /// Name of the affected input.
+        name: PortName,
+        /// The input's wire kind.
+        kind: &'static str,
+    },
+
     /// Generated columns unexpectedly violated the session schema.
     #[error("sampler generated an invalid request batch: {0}")]
     InvalidBatch(#[from] RequestBatchError),
@@ -83,7 +93,8 @@ pub enum SamplingError {
 
 /// Draws one reproducible uniform request over every session input.
 ///
-/// Quantities are sampled over their closed declared bounds, integers over
+/// Quantities and datetimes (seconds since J2000) are sampled over their
+/// closed declared bounds, integers over
 /// their closed integer bounds, key variants and Booleans (`false`, `true`)
 /// with equal probability. Each input uses a separately derived `ChaCha12`
 /// stream, while the model seed uses another domain-separated stream. The
@@ -134,13 +145,13 @@ fn uniform_column(
         name: input.name().clone(),
     };
     match input.wire() {
-        WireType::Quantity(_) => {
-            let (lower, upper) = quantity_bounds(input)?;
+        WireType::Quantity(_) | WireType::Datetime(_) => {
+            let (lower, upper) = continuous_bounds(input)?;
             let distribution = Uniform::new_inclusive(lower, upper).map_err(|_| unsampleable())?;
             let values = (0..row_count)
                 .map(|_| FiniteF64::new(distribution.sample(rng)).map_err(|_| unsampleable()))
                 .collect::<Result<_, _>>()?;
-            Ok(InputColumn::Quantity(values))
+            Ok(continuous_column(input, values))
         }
         WireType::Int => {
             let (lower, upper) = integer_bounds(input)?;
@@ -167,12 +178,16 @@ fn uniform_column(
                     .collect(),
             ))
         }
+        WireType::Complex(_) | WireType::Indexed(_) | WireType::Algebraic(_) => {
+            Err(unsupported(input))
+        }
     }
 }
 
 /// Draws one reproducible Latin-hypercube request over every session input.
 ///
-/// Each quantity input has exactly one randomized point in each of `row_count`
+/// Each quantity or datetime input has exactly one randomized point in each
+/// of `row_count`
 /// equal-probability strata of its closed declared bounds, followed by an
 /// independently seeded permutation. Integer, key, and Boolean inputs use
 /// midpoint inverse-CDF strata over their levels (integers in order, key
@@ -209,7 +224,7 @@ pub fn sample_latin_hypercube(
     let has_continuous = schema
         .inputs()
         .iter()
-        .any(|input| matches!(input.wire(), WireType::Quantity(_)));
+        .any(|input| matches!(input.wire(), WireType::Quantity(_) | WireType::Datetime(_)));
     if has_continuous && row_count_u64 > MAX_EXACT_F64_INTEGER {
         return Err(SamplingError::TooManyContinuousStrata {
             row_count,
@@ -240,8 +255,8 @@ fn latin_hypercube_column(
         name: input.name().clone(),
     };
     match input.wire() {
-        WireType::Quantity(_) => {
-            let (lower, upper) = quantity_bounds(input)?;
+        WireType::Quantity(_) | WireType::Datetime(_) => {
+            let (lower, upper) = continuous_bounds(input)?;
             let width = upper - lower;
             if !width.is_finite() {
                 return Err(unsampleable());
@@ -259,7 +274,7 @@ fn latin_hypercube_column(
                 .into_iter()
                 .map(|value| FiniteF64::new(value).map_err(|_| unsampleable()))
                 .collect::<Result<_, _>>()?;
-            Ok(InputColumn::Quantity(values))
+            Ok(continuous_column(input, values))
         }
         WireType::Int => {
             let (lower, upper) = integer_bounds(input)?;
@@ -280,6 +295,9 @@ fn latin_hypercube_column(
         WireType::Bool => {
             let values = discrete_levels(&BOOL_LEVELS, row_count, rng).ok_or_else(unsampleable)?;
             Ok(InputColumn::Bool(values))
+        }
+        WireType::Complex(_) | WireType::Indexed(_) | WireType::Algebraic(_) => {
+            Err(unsupported(input))
         }
     }
 }
@@ -312,12 +330,35 @@ fn input_rng(
     )))
 }
 
-fn quantity_bounds(input: &SessionInput) -> Result<(f64, f64), SamplingError> {
-    match input.domain() {
-        Some(Domain::Quantity(bounds)) => match (bounds.min(), bounds.max()) {
-            (Some(lower), Some(upper)) => Ok((lower.get(), upper.get())),
-            _ => Err(unbounded(input)),
+/// The column of sampled continuous `values` for a quantity or datetime
+/// input.
+const fn continuous_column(input: &SessionInput, values: Vec<FiniteF64>) -> InputColumn {
+    match input.wire() {
+        WireType::Datetime(_) => InputColumn::Datetime(values),
+        _ => InputColumn::Quantity(values),
+    }
+}
+
+fn unsupported(input: &SessionInput) -> SamplingError {
+    SamplingError::UnsupportedInput {
+        name: input.name().clone(),
+        kind: match input.wire() {
+            WireType::Complex(_) => "complex",
+            WireType::Indexed(_) => "indexed",
+            _ => "algebraic",
         },
+    }
+}
+
+/// The closed bounds of a quantity or datetime input's domain.
+fn continuous_bounds(input: &SessionInput) -> Result<(f64, f64), SamplingError> {
+    match input.domain() {
+        Some(Domain::Quantity(bounds) | Domain::Datetime(bounds)) => {
+            match (bounds.min(), bounds.max()) {
+                (Some(lower), Some(upper)) => Ok((lower.get(), upper.get())),
+                _ => Err(unbounded(input)),
+            }
+        }
         _ => Err(unbounded(input)),
     }
 }
@@ -615,6 +656,97 @@ mod tests {
         });
         assert_eq!(sample_uniform(&wide, 4, 1, 0), unsampleable);
         assert_eq!(sample_latin_hypercube(&wide, 4, 1, 0), unsampleable);
+    }
+
+    fn datetime_schema() -> Arc<SessionSchema> {
+        let finite = |value| FiniteF64::new(value).unwrap();
+        ModelSchemaBuilder::new()
+            .datetime(
+                "launch",
+                graphcal_model_protocol::DatetimeType::new(graphcal_model_protocol::TimeScale::Tai),
+                Bounds::new(Some(finite(1.0e8)), Some(finite(1.0e8 + 86_400.0))).unwrap(),
+            )
+            .unwrap()
+            .boolean_output("failure")
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn datetimes(request: &EvalRequest) -> Vec<f64> {
+        let InputColumn::Datetime(values) = &request.inputs().columns()[0] else {
+            panic!("wrong sampled column kind");
+        };
+        values.iter().map(|value| value.get()).collect()
+    }
+
+    #[test]
+    fn datetimes_are_sampled_as_continuous_seconds_since_j2000() {
+        let schema = datetime_schema();
+        let in_domain = |values: &[f64]| {
+            values
+                .iter()
+                .all(|value| (1.0e8..=1.0e8 + 86_400.0).contains(value))
+        };
+        let uniform = sample_uniform(&schema, 64, 7, 0).unwrap();
+        assert!(in_domain(&datetimes(&uniform)));
+        let lhs = sample_latin_hypercube(&schema, 8, 7, 0).unwrap();
+        let mut strata = datetimes(&lhs)
+            .iter()
+            .map(|value| ((value - 1.0e8) / 86_400.0 * 8.0).floor())
+            .collect::<Vec<_>>();
+        strata.sort_by(f64::total_cmp);
+        assert_eq!(strata, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn complex_indexed_and_algebraic_inputs_are_rejected() {
+        let complex = graphcal_model_protocol::WireType::Complex(
+            QuantityType::new(Dimension::dimensionless(), None).unwrap(),
+        );
+        let interface = graphcal_model_protocol::ModelInterface::new(
+            vec![
+                graphcal_model_protocol::ParameterDescription::new(
+                    PortName::new("z").unwrap(),
+                    "Complex",
+                    graphcal_model_protocol::PortWire::Supported(complex),
+                    None,
+                    false,
+                )
+                .unwrap(),
+            ],
+            vec![graphcal_model_protocol::OutputDescription::new(
+                PortName::new("failure").unwrap(),
+                "Bool",
+                graphcal_model_protocol::PortWire::Supported(
+                    graphcal_model_protocol::WireType::Bool,
+                ),
+            )],
+        )
+        .unwrap();
+        let schema = Arc::new(
+            interface
+                .configure(
+                    &graphcal_model_protocol::SessionSpec::new(
+                        vec![PortName::new("z").unwrap()],
+                        vec![PortName::new("failure").unwrap()],
+                    ),
+                    graphcal_model_protocol::CanonicalUnitsOnly,
+                )
+                .unwrap(),
+        );
+        for result in [
+            sample_uniform(&schema, 4, 1, 0),
+            sample_latin_hypercube(&schema, 4, 1, 0),
+        ] {
+            assert!(matches!(
+                result,
+                Err(SamplingError::UnsupportedInput {
+                    kind: "complex",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

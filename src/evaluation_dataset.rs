@@ -175,9 +175,20 @@ pub fn evaluation_to_dataset(
 fn input_feature(input: &SessionInput, column: &InputColumn) -> Result<Feature, DataError> {
     let name = input.name().as_str();
     match (column, input.wire()) {
-        (InputColumn::Quantity(values), _) => {
+        (InputColumn::Quantity(values) | InputColumn::Datetime(values), _) => {
             Feature::continuous(name, values.iter().map(|value| value.get()).collect())
         }
+        (InputColumn::Complex(_), _) => Err(DataError::UnsupportedFeature {
+            name: name.to_owned(),
+            kind: "complex",
+        }),
+        (InputColumn::Structured(_), wire) => Err(DataError::UnsupportedFeature {
+            name: name.to_owned(),
+            kind: match wire {
+                WireType::Indexed(_) => "indexed",
+                _ => "algebraic",
+            },
+        }),
         (InputColumn::Int(values), _) => Feature::integer(name, values.clone()),
         (InputColumn::Bool(values), _) => Feature::categorical_from_dictionary(
             name,
@@ -369,6 +380,43 @@ mod tests {
         assert!(matches!(
             evaluation_to_dataset(&schema, other, result, failure),
             Err(EvaluationDatasetError::MismatchedId { .. })
+        ));
+    }
+
+    #[test]
+    fn datetime_inputs_are_continuous_features_and_complex_inputs_are_rejected() {
+        let finite = |value| FiniteF64::new(value).unwrap();
+        let datetime = ModelSchemaBuilder::new()
+            .datetime(
+                "launch",
+                graphcal_model_protocol::DatetimeType::new(graphcal_model_protocol::TimeScale::Utc),
+                graphcal_model_protocol::Bounds::new(Some(finite(0.0)), Some(finite(10.0)))
+                    .unwrap(),
+            )
+            .unwrap()
+            .boolean_output("failure")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            input_feature(
+                &datetime.inputs()[0],
+                &InputColumn::Datetime(vec![finite(1.0), finite(2.0)])
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            input_feature(
+                &datetime.inputs()[0],
+                &InputColumn::Complex(vec![graphcal_model_protocol::ComplexValue {
+                    re: finite(1.0),
+                    im: finite(0.0),
+                }])
+            ),
+            Err(DataError::UnsupportedFeature {
+                kind: "complex",
+                ..
+            })
         ));
     }
 }

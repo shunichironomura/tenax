@@ -18,6 +18,16 @@ pub enum DataError {
     #[error("a dataset must contain at least one feature")]
     NoFeatures,
 
+    /// An input's values have no scalar feature representation: a complex,
+    /// indexed, or algebraic value.
+    #[error("input '{name}' is a {kind} value, which is not a PRIM feature")]
+    UnsupportedFeature {
+        /// The input's name.
+        name: String,
+        /// The input's wire kind.
+        kind: &'static str,
+    },
+
     /// No outcomes were supplied.
     #[error("a dataset must contain at least one outcome")]
     NoOutcomes,

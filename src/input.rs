@@ -19,6 +19,14 @@ pub enum ValueKind {
     Bool,
     /// A categorical key variant.
     Key,
+    /// A complex quantity.
+    Complex,
+    /// A datetime, as seconds since J2000.
+    Datetime,
+    /// An indexed value.
+    Indexed,
+    /// A record or tagged union.
+    Algebraic,
 }
 
 impl ValueKind {
@@ -30,6 +38,10 @@ impl ValueKind {
             ValueRef::Int(_) => Self::Int,
             ValueRef::Bool(_) => Self::Bool,
             ValueRef::Key(_) => Self::Key,
+            ValueRef::Complex(_) => Self::Complex,
+            ValueRef::Datetime(_) => Self::Datetime,
+            ValueRef::Indexed(_) => Self::Indexed,
+            ValueRef::Algebraic { .. } => Self::Algebraic,
         }
     }
 }
@@ -41,6 +53,10 @@ impl fmt::Display for ValueKind {
             Self::Int => "integer",
             Self::Bool => "Boolean",
             Self::Key => "key",
+            Self::Complex => "complex",
+            Self::Datetime => "datetime",
+            Self::Indexed => "indexed",
+            Self::Algebraic => "algebraic",
         })
     }
 }

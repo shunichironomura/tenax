@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use graphcal_model_protocol::{
-    Bounds, BoundsError, CanonicalUnitsOnly, Dimension, Domain, FiniteF64, IndexName,
+    Bounds, BoundsError, CanonicalUnitsOnly, DatetimeType, Dimension, Domain, FiniteF64, IndexName,
     InterfaceError, KeyType, KeyTypeError, LabelError, ModelInterface, NonFiniteError,
     OutputDescription, ParameterDescription, PortName, PortWire, QuantityType, SessionError,
     SessionSchema, SessionSpec, VariantName, WireType,
@@ -142,6 +142,28 @@ impl ModelSchemaBuilder {
         bounds: Bounds<FiniteF64>,
     ) -> Result<Self, ModelSchemaError> {
         Ok(self.quantity_port(PortName::new(name)?, quantity, bounds))
+    }
+
+    /// Declares a datetime input read in `datetime`'s time scale whose values,
+    /// in seconds since J2000, lie within `bounds`.
+    ///
+    /// Half-open bounds are accepted, but samplers require both sides.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelSchemaError::Label`] when the name is invalid.
+    pub fn datetime(
+        mut self,
+        name: impl Into<String>,
+        datetime: DatetimeType,
+        bounds: Bounds<FiniteF64>,
+    ) -> Result<Self, ModelSchemaError> {
+        self.parameters.push(parameter(
+            PortName::new(name)?,
+            WireType::Datetime(datetime),
+            Some(Domain::Datetime(bounds)),
+        ));
+        Ok(self)
     }
 
     /// Declares an integer input over the closed interval `[lower, upper]`.
@@ -365,6 +387,17 @@ fn type_spelling(wire: &WireType) -> String {
         WireType::Int => "Int".to_owned(),
         WireType::Bool => "Bool".to_owned(),
         WireType::Key(key) => format!("Key<{}>", key.index()),
+        WireType::Complex(quantity) => format!(
+            "Complex<{}>",
+            type_spelling(&WireType::Quantity(quantity.clone()))
+        ),
+        WireType::Datetime(datetime) => format!("Datetime<{}>", datetime.scale()),
+        WireType::Indexed(indexed) => format!(
+            "{}[{}]",
+            type_spelling(indexed.element()),
+            indexed.axis().index()
+        ),
+        WireType::Algebraic(algebraic) => algebraic.name().to_string(),
     }
 }
 
