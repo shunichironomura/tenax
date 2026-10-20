@@ -46,8 +46,8 @@
 //! ```
 //! use tenax::graphcal_model_protocol::{RowFailure, Value};
 //! use tenax::{
-//!     ChunkingPolicy, Evaluator, InputRow, ModelSchemaBuilder, ParallelInProcessEvaluator,
-//!     RowContext, evaluation_to_dataset, sample_uniform,
+//!     ChunkingPolicy, EvaluationTable, Evaluator, InputRow, ModelSchemaBuilder,
+//!     ParallelInProcessEvaluator, RowContext, sample_uniform,
 //! };
 //!
 //! let schema = ModelSchemaBuilder::new()
@@ -70,7 +70,9 @@
 //!     .evaluate(vec![request])
 //!     .next()
 //!     .expect("one request produces one result")?;
-//! let dataset = evaluation_to_dataset(&schema, retained, result, failure)?;
+//! let mut table = EvaluationTable::new(schema.clone());
+//! table.push(retained, result)?;
+//! let dataset = table.dataset(failure)?;
 //!
 //! assert_eq!(dataset.row_count(), 1_000);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -80,6 +82,7 @@ mod data;
 mod error;
 mod evaluation;
 mod evaluation_dataset;
+mod evaluation_table;
 #[cfg(feature = "graphcal")]
 mod graphcal;
 mod input;
@@ -99,7 +102,8 @@ pub use evaluation::{
     ChunkResult, ChunkResultError, EvalRequest, EvaluationId, Evaluator, InProcessEvaluator,
     ModelPanic, OutputRow, OutputRowError, RowContext, RowFailure, RowOutcome, SessionMismatch,
 };
-pub use evaluation_dataset::{EvaluationDatasetError, evaluation_to_dataset};
+pub use evaluation_dataset::EvaluationDatasetError;
+pub use evaluation_table::{EvaluatedRequest, EvaluationTable, EvaluationTableError};
 #[cfg(feature = "graphcal")]
 pub use graphcal::GraphcalEvaluator;
 pub use input::{InputAccessError, InputRow, ValueKind};

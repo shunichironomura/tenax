@@ -65,8 +65,8 @@ A simple Rust model declares its inputs and outputs with `ModelSchemaBuilder` an
 ```rust
 use tenax::graphcal_model_protocol::{KeyRef, RowFailure, Value};
 use tenax::{
-    ChunkingPolicy, Evaluator, InputRow, ModelSchemaBuilder, ParallelInProcessEvaluator,
-    RowContext, evaluation_to_dataset, sample_uniform,
+    ChunkingPolicy, EvaluationTable, Evaluator, InputRow, ModelSchemaBuilder,
+    ParallelInProcessEvaluator, RowContext, sample_uniform,
 };
 
 let schema = ModelSchemaBuilder::new()
@@ -93,7 +93,9 @@ let result = evaluator
     .evaluate(vec![request])
     .next()
     .expect("one request produces one result")?;
-let dataset = evaluation_to_dataset(&schema, retained_request, result, failure)?;
+let mut table = EvaluationTable::new(schema.clone());
+table.push(retained_request, result)?;
+let dataset = table.dataset(failure)?;
 assert_eq!(dataset.row_count(), 1_000);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -106,7 +108,7 @@ Enable the `graphcal` feature to evaluate a Graphcal model. The re-exported `gra
 
 ```rust
 use tenax::graphcal_model_client::{Bool, GraphcalCommand, Model, Quantity};
-use tenax::{Evaluator, GraphcalEvaluator, evaluation_to_dataset, sample_latin_hypercube};
+use tenax::{EvaluationTable, Evaluator, GraphcalEvaluator, sample_latin_hypercube};
 
 let model = Model::describe(GraphcalCommand::new("reliability.gcl"))?;
 let load = model.input::<Quantity>("load")?;
@@ -123,7 +125,9 @@ let result = evaluator
     .expect("one request produces one result")?;
 evaluator.shutdown()?;
 let failure = schema.output_slot("failure").expect("the session reads failure");
-let dataset = evaluation_to_dataset(&schema, retained_request, result, failure)?;
+let mut table = EvaluationTable::new(schema.clone());
+table.push(retained_request, result)?;
+let dataset = table.dataset(failure)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

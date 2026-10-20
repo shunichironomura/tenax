@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use tenax::graphcal_model_protocol::{InputSlot, KeyRef, RowFailure, SessionSchema, Value};
 use tenax::{
-    ChunkingPolicy, EvalRequest, Evaluator, InputRow, ModelSchemaBuilder, ModelSchemaError,
-    Objective, ParallelInProcessEvaluator, Prim, PrimConfig, Restriction, RowContext,
-    evaluation_to_dataset, sample_uniform,
+    ChunkingPolicy, EvalRequest, EvaluationTable, Evaluator, InputRow, ModelSchemaBuilder,
+    ModelSchemaError, Objective, ParallelInProcessEvaluator, Prim, PrimConfig, Restriction,
+    RowContext, sample_uniform,
 };
 
 fn toy_schema() -> Result<Arc<SessionSchema>, ModelSchemaError> {
@@ -43,7 +43,9 @@ fn sampling_through_in_process_evaluation_recovers_the_known_failure_region() {
     let request = sample_uniform(&schema, 5_000, 0x5eed, 0).unwrap();
     let retained_request: EvalRequest = request.clone();
     let result = evaluator.evaluate(vec![request]).next().unwrap().unwrap();
-    let dataset = evaluation_to_dataset(&schema, retained_request, result, failure).unwrap();
+    let mut table = EvaluationTable::new(Arc::clone(&schema));
+    table.push(retained_request, result).unwrap();
+    let dataset = table.dataset(failure).unwrap();
 
     let config = PrimConfig::new(0.05, 0.05, 0.05, Objective::Lenient1).unwrap();
     let discovered = Prim::new(&dataset, config).find_box().unwrap();

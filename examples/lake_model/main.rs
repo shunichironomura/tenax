@@ -18,9 +18,9 @@ use tenax::graphcal_model_protocol::{
     Domain, InputSlot, RowFailure, SessionInput, SessionSchema, Value,
 };
 use tenax::{
-    BoxStep, ChunkingPolicy, Dataset, Evaluator, FeatureView, InputRow, ModelSchemaBuilder,
-    ParallelInProcessEvaluator, Prim, PrimBox, PrimPhase, Restriction, RowContext,
-    evaluation_to_dataset, sample_uniform,
+    BoxStep, ChunkingPolicy, Dataset, EvaluationTable, Evaluator, FeatureView, InputRow,
+    ModelSchemaBuilder, ParallelInProcessEvaluator, Prim, PrimBox, PrimPhase, Restriction,
+    RowContext, sample_uniform,
 };
 use thiserror::Error;
 
@@ -162,7 +162,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .evaluate(vec![request])
         .next()
         .ok_or(ExampleError::MissingEvaluationResult)??;
-    let dataset = evaluation_to_dataset(&schema, retained_request, result, desirable)?;
+    let mut table = EvaluationTable::new(Arc::clone(&schema));
+    table.push(retained_request, result)?;
+    let dataset = table.dataset(desirable)?;
     let mut prim = Prim::new(&dataset, tenax::PrimConfig::default());
     let first_box = prim.find_box().ok_or(ExampleError::MissingPrimBox)?;
 
