@@ -153,7 +153,7 @@ impl EvaluationTable {
 ///
 /// Every column was validated against the same input, so all share the
 /// variant of the first; an empty list yields an empty quantity column.
-fn concatenate(columns: &[&InputColumn]) -> InputColumn {
+pub fn concatenate(columns: &[&InputColumn]) -> InputColumn {
     fn join<T: Clone>(
         columns: &[&InputColumn],
         values: impl Fn(&InputColumn) -> Option<&[T]>,
