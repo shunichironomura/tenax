@@ -81,6 +81,8 @@
 mod data;
 mod error;
 mod evaluation;
+#[cfg(feature = "arrow")]
+mod evaluation_arrow;
 mod evaluation_dataset;
 mod evaluation_table;
 #[cfg(feature = "graphcal")]
@@ -92,6 +94,12 @@ mod prim;
 mod sampling;
 mod seed;
 
+#[cfg(feature = "arrow")]
+pub use arrow_array;
+#[cfg(feature = "arrow")]
+pub use arrow_ipc;
+#[cfg(feature = "arrow")]
+pub use arrow_schema;
 #[cfg(feature = "graphcal")]
 pub use graphcal_model_client;
 pub use graphcal_model_protocol;
@@ -101,6 +109,11 @@ pub use error::{DataError, PrimError};
 pub use evaluation::{
     ChunkResult, ChunkResultError, EvalRequest, EvaluationId, Evaluator, InProcessEvaluator,
     ModelPanic, OutputRow, OutputRowError, RowContext, RowFailure, RowOutcome, SessionMismatch,
+};
+#[cfg(feature = "arrow")]
+pub use evaluation_arrow::{
+    EVALUATION_FORMAT_VERSION, EvaluationDecodeError, TENAX_METADATA_KEY, decode_evaluation_schema,
+    evaluation_schema,
 };
 pub use evaluation_dataset::EvaluationDatasetError;
 pub use evaluation_table::{EvaluatedRequest, EvaluationTable, EvaluationTableError};

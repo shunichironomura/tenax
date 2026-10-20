@@ -13,7 +13,7 @@ keywords = ["decision-making", "prim", "scenario-discovery", "uncertainty"]
 categories = ["algorithms", "mathematics", "science"]
 
 [package.metadata.docs.rs]
-features = ["graphcal"]
+features = ["arrow", "graphcal"]
 
 [[test]]
 name = "graphcal_workflow"
@@ -21,20 +21,34 @@ path = "tests/graphcal_workflow.rs"
 required-features = ["graphcal"]
 
 [dependencies]
-graphcal-model-client = { version = "=0.0.1-alpha.39", optional = true }
-graphcal-model-protocol = "=0.0.1-alpha.39"
+arrow-array = { version = "60.0.0", optional = true }
+arrow-ipc = { version = "60.0.0", optional = true }
+arrow-schema = { version = "60.0.0", optional = true }
+graphcal-model-client = { version = "=0.0.1-alpha.40", optional = true }
+graphcal-model-protocol = "=0.0.1-alpha.40"
 rand = { version = "0.10.2", default-features = false, features = ["std"] }
 rand_chacha = "0.10.0"
 rayon = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1.0.154", optional = true }
 thiserror = "2.0.19"
 
 [dev-dependencies]
+arrow-select = "60.0.0"
 rand_distr = "=0.6.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 
 [features]
 graphcal = ["dep:graphcal-model-client"]
+arrow = [
+  "dep:arrow-array",
+  "dep:arrow-ipc",
+  "dep:arrow-schema",
+  "dep:serde",
+  "dep:serde_json",
+  "graphcal-model-protocol/arrow",
+]
 
 [lints.clippy]
 all = "warn"
