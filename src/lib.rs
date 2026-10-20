@@ -16,6 +16,13 @@
 //! Graphcal model through the re-exported `graphcal_model_client`. Simple Rust
 //! models are declared with [`ModelSchemaBuilder`] and evaluated in process.
 //!
+//! Completed evaluations are kept, with every input, output, and row outcome,
+//! in an [`EvaluationTable`], from which PRIM datasets are derived with a
+//! [`CaseRule`] or a closure. The optional `arrow` feature stores tables as
+//! self-describing Arrow IPC streams (`EvaluationWriter` and
+//! `EvaluationReader`), so one evaluation can feed later analyses without
+//! re-evaluating the model.
+//!
 //! # Example
 //!
 //! ```
