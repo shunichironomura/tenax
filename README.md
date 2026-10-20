@@ -19,7 +19,9 @@ Tenax currently provides a complete path from a Graphcal model or an in-process 
 - Per-row success or failure data: failed assertions, out-of-domain inputs, and evaluation errors reported by the model, plus caught unwinding panics and invalid outputs.
 - Sequential and Rayon-parallel in-process closure evaluators, with an explicit fixed-row work-chunk policy and completion-order result streaming.
 - A `GraphcalEvaluator` (optional `graphcal` feature) that drives a Graphcal model through a persistent `graphcal model serve` session.
-- Explicit conversion of a successful evaluation with a Boolean output into a static PRIM dataset; failed rows are rejected rather than silently dropped.
+- An `EvaluationTable` that keeps every input, every output, and every row outcome (failed rows included) of any number of evaluations of one session.
+- Explicit conversion of an evaluation table into a static PRIM dataset, classifying cases of interest from a Boolean output, a threshold on a quantity, datetime, or integer output, key membership, or a closure; failed rows are rejected rather than silently dropped.
+- Self-describing storage of evaluation tables as Arrow IPC streams (optional `arrow` feature), readable back into Tenax without the model and directly by pyarrow and polars.
 
 Tenax also implements conventional Patient Rule Induction Method (PRIM) analysis for static binary input/output datasets:
 
@@ -137,6 +139,36 @@ Graphcal models are deterministic, so the request seed is not sent to the server
 GRAPHCAL_BIN=/path/to/graphcal cargo test --features graphcal --test graphcal_workflow -- --ignored
 ```
 
+### Storing and reusing evaluations
+
+Enable the `arrow` feature to store an evaluation table and analyze it again later, for example with another threshold or another output, without re-evaluating the model. `EvaluationWriter` appends one flushed Arrow record batch per evaluation to an Arrow IPC stream (conventionally a `.arrows` file), so a run that stops part-way keeps every evaluation completed before the stop. With `schema`, `retained_request`, and `result` as in the examples above, for a session that also reads a quantity output `stress`:
+
+```rust
+use std::fs::File;
+use std::io::BufWriter;
+
+use tenax::graphcal_model_protocol::FiniteF64;
+use tenax::{CaseRule, Comparison, EvaluatedRequest, EvaluationReader, EvaluationWriter};
+
+let file = BufWriter::new(File::create("evaluations.arrows")?);
+let mut writer = EvaluationWriter::try_new(file, &schema)?;
+writer.write(&EvaluatedRequest::new(&schema, retained_request, result)?)?;
+writer.finish()?;
+
+let table = EvaluationReader::try_new(File::open("evaluations.arrows")?)?.read_table()?;
+let stress = table.schema().output_slot("stress").expect("the session reads stress");
+let dataset = table.dataset_where(
+    stress,
+    &CaseRule::Quantity {
+        comparison: Comparison::AtLeast,
+        threshold: FiniteF64::new(1.8)?,
+    },
+)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The stream's schema extends a Graphcal session record: `evaluation_id` (16 bytes, big-endian), `row`, and `seed` columns; an `inputs` struct and an `outputs` struct whose fields carry their Graphcal wire types, domains, and unit scales as `graphcal` metadata; and an `outcome` struct with the row's outcome `kind` (`success`, `assertion_failed`, `panic`, and so on), `subject`, `message`, and output counts. Outputs are null in failed rows. `EvaluationReader` restores the session from the schema itself. `read_table` rejects a stream that stops inside a message, while `recover_table` returns the evaluations read before it. The format cannot tell a finished stream from one that stopped between messages. Python reads the same file with `pyarrow.ipc.open_stream` or `polars.read_ipc_stream`.
+
 ### Sampling
 
 `sample_uniform` draws each input independently. `sample_latin_hypercube` places exactly one quantity or datetime sample in each equal-probability stratum and uses independently permuted midpoint inverse-CDF strata for integer, key, and Boolean inputs. The discrete construction remains balanced when rows outnumber available values. Both methods derive input streams, request IDs, and model seeds deterministically from the run seed and request sequence.
@@ -200,7 +232,7 @@ A model evaluator maps a batch of input configurations to model outputs. It may 
 ## Roadmap
 
 1. **Complete:** Implement conventional PRIM for static input/output datasets and establish a correctness test suite against EMA Workbench.
-2. **Complete:** Implement a transport-independent evaluator abstraction, reproducible uniform and Latin-hypercube sampling, sequential and Rayon-parallel in-process workflows, and Graphcal model evaluation through the Graphcal batch model-evaluation protocol.
+2. **Complete:** Implement a transport-independent evaluator abstraction, reproducible uniform and Latin-hypercube sampling, sequential and Rayon-parallel in-process workflows, and Graphcal model evaluation through the Graphcal batch model-evaluation protocol. Store complete evaluations as self-describing Arrow IPC streams for reuse across analyses.
 3. Implement adaptive scenario discovery with explicit acquisition and stopping rules. Benchmark it against fixed Latin-hypercube sampling on representative problems.
 4. Add remote and asynchronous evaluation, including cancellation, and a CLI client.
 5. Publish a Python package that wraps the Rust core through PyO3 and provides a notebook-friendly API.

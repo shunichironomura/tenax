@@ -63,6 +63,8 @@ fn latin_hypercube_through_graphcal_recovers_the_known_failure_region() {
 
     let mut table = EvaluationTable::new(schema);
     table.push(retained_request, result).unwrap();
+    #[cfg(feature = "arrow")]
+    assert_eq!(stream_round_trip(&table).unwrap(), table);
     let dataset = table.dataset(failure_slot).unwrap();
     let config = PrimConfig::new(0.05, 0.05, 0.05, Objective::Lenient1).unwrap();
     let discovered = Prim::new(&dataset, config).find_box().unwrap();
@@ -80,4 +82,16 @@ fn latin_hypercube_through_graphcal_recovers_the_known_failure_region() {
         panic!("PRIM did not return categorical mode limits");
     };
     assert_eq!(mode.values(), &BTreeSet::from(["Fragile".to_owned()]));
+}
+
+/// Stores a Graphcal session's evaluations and restores them, session
+/// included, without the model.
+#[cfg(feature = "arrow")]
+fn stream_round_trip(
+    table: &EvaluationTable,
+) -> Result<EvaluationTable, Box<dyn std::error::Error>> {
+    let mut writer = tenax::EvaluationWriter::try_new(Vec::new(), table.schema())?;
+    writer.write_table(table)?;
+    let bytes = writer.finish()?;
+    Ok(tenax::EvaluationReader::try_new(bytes.as_slice())?.read_table()?)
 }
