@@ -1,40 +1,21 @@
-//! Conversion of one completed binary-output evaluation into a static PRIM
-//! dataset.
-
-use std::sync::Arc;
+//! Conversion of completed evaluations into static PRIM datasets.
 
 use graphcal_model_protocol::{
-    InputColumn, KeyRef, KeyType, OutputSlot, PortName, SessionInput, SessionSchema, Value,
-    WireType,
+    InputColumn, KeyRef, KeyType, OutputSlot, PortName, SessionInput, Value, WireType,
 };
 use thiserror::Error;
 
 use crate::DataError;
 use crate::data::{Dataset, Feature};
-use crate::evaluation::{
-    ChunkResult, EvalRequest, EvaluationId, OutputRowError, RowFailure, RowOutcome, SessionMismatch,
-};
+use crate::evaluation::{EvaluationId, RowFailure, RowOutcome};
+use crate::evaluation_table::EvaluationTable;
 
 /// Category labels of a Boolean input, indexed by its value.
 const BOOL_CATEGORIES: [&str; 2] = ["false", "true"];
 
-/// Errors raised when converting one completed binary-output request to PRIM
-/// input data.
+/// Errors raised when converting completed evaluations to PRIM input data.
 #[derive(Debug, Error, PartialEq)]
 pub enum EvaluationDatasetError {
-    /// The result belongs to a different request.
-    #[error("request ID {request_id} does not match result ID {result_id}")]
-    MismatchedId {
-        /// Identifier on the retained request.
-        request_id: EvaluationId,
-        /// Identifier echoed by the result.
-        result_id: EvaluationId,
-    },
-
-    /// The request was built for a different session schema.
-    #[error(transparent)]
-    InvalidInputs(#[from] SessionMismatch),
-
     /// The chosen output does not exist.
     #[error("output slot {slot} is out of bounds for a session with {output_count} outputs")]
     OutputSlotOutOfBounds {
@@ -54,33 +35,15 @@ pub enum EvaluationDatasetError {
         wire: WireType,
     },
 
-    /// The result has a different number of rows from the request.
-    #[error("result has {actual} rows, but request {id} has {expected} input rows")]
-    RowCountMismatch {
+    /// One row records a model or validation failure.
+    #[error("row {row} of evaluation {id} failed: {failure}")]
+    FailedRow {
         /// Evaluation request identifier.
         id: EvaluationId,
-        /// Number of input rows.
-        expected: usize,
-        /// Number of result rows.
-        actual: usize,
-    },
-
-    /// One result row records a model or validation failure.
-    #[error("evaluation row {row} failed: {failure}")]
-    FailedRow {
-        /// Zero-based row position.
+        /// Zero-based row position within the request.
         row: usize,
         /// Explicit failure data.
         failure: RowFailure,
-    },
-
-    /// A supposedly successful row does not match the session's outputs.
-    #[error("evaluation row {row} has invalid outputs: {error}")]
-    InvalidOutputRow {
-        /// Zero-based row position.
-        row: usize,
-        /// Output schema violation.
-        error: OutputRowError,
     },
 
     /// The resulting static dataset violates a dataset invariant.
@@ -88,89 +51,158 @@ pub enum EvaluationDatasetError {
     InvalidDataset(#[from] DataError),
 }
 
-/// Converts one successful evaluation with a Boolean output into a static PRIM
-/// dataset.
-///
-/// Each session input becomes one PRIM feature with the input's name:
-/// quantities become continuous features (in the input's wire unit), integers
-/// become integer features, keys become categorical features labeled by
-/// variant name, and Booleans become categorical features labeled `"false"`
-/// and `"true"`. The Boolean `output` classifies cases of interest.
-///
-/// This function deliberately rejects the first failed row rather than silently
-/// dropping it. A driver that wants a different missing-evaluation policy must
-/// make that policy explicit before constructing a [`Dataset`].
-///
-/// # Errors
-///
-/// Returns [`EvaluationDatasetError`] when request/result identity or row count
-/// differs, the request belongs to another session, `output` is not a Boolean
-/// output of `schema`, an output row violates `schema`, or any row failed.
-pub fn evaluation_to_dataset(
-    schema: &Arc<SessionSchema>,
-    request: EvalRequest,
-    result: ChunkResult,
-    output: OutputSlot,
-) -> Result<Dataset, EvaluationDatasetError> {
-    if request.id() != result.id() {
-        return Err(EvaluationDatasetError::MismatchedId {
-            request_id: request.id(),
-            result_id: result.id(),
-        });
+impl EvaluationTable {
+    /// Converts every session input into one PRIM feature, in session order,
+    /// with one observation per table row.
+    ///
+    /// Each feature has the input's name: quantities and datetimes become
+    /// continuous features (in the input's wire unit and seconds since J2000,
+    /// respectively), integers become integer features, keys become
+    /// categorical features labeled by entry (see below), and Booleans become
+    /// categorical features labeled `"false"` and `"true"`. Key entries are
+    /// labeled by variant name, `Fin` position, or coordinate in its SI unit.
+    ///
+    /// Inputs of failed rows are included, so the features describe every
+    /// evaluated row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataError`] when the table is empty, or when an input is
+    /// complex, indexed, or algebraic, which PRIM cannot use yet.
+    pub fn features(&self) -> Result<Vec<Feature>, DataError> {
+        self.schema()
+            .inputs()
+            .iter()
+            .enumerate()
+            .map(|(position, input)| {
+                let columns = self
+                    .evaluations()
+                    .iter()
+                    .filter_map(|evaluation| evaluation.request().inputs().columns().get(position))
+                    .collect::<Vec<_>>();
+                input_feature(input, &concatenate(&columns))
+            })
+            .collect()
     }
-    request.validate_against(schema)?;
-    let selected =
-        schema
-            .output(output)
-            .ok_or_else(|| EvaluationDatasetError::OutputSlotOutOfBounds {
+
+    /// Reads the Boolean `output` of every row as its case-of-interest
+    /// classification, in table order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvaluationDatasetError`] when `output` is out of range or not
+    /// Boolean, or when any row failed. Failed rows are rejected rather than
+    /// silently dropped; a caller that wants another missing-evaluation
+    /// policy must apply it explicitly before classifying.
+    pub fn cases(&self, output: OutputSlot) -> Result<Vec<bool>, EvaluationDatasetError> {
+        let selected = self.schema().output(output).ok_or_else(|| {
+            EvaluationDatasetError::OutputSlotOutOfBounds {
                 slot: output.get(),
-                output_count: schema.outputs().len(),
-            })?;
-    if selected.wire() != &WireType::Bool {
-        return Err(EvaluationDatasetError::NonBooleanOutput {
-            output: selected.name().clone(),
-            wire: selected.wire().clone(),
-        });
-    }
-    if request.inputs().rows() != result.rows().len() {
-        return Err(EvaluationDatasetError::RowCountMismatch {
-            id: request.id(),
-            expected: request.inputs().rows(),
-            actual: result.rows().len(),
-        });
-    }
-
-    let cases_of_interest = result
-        .into_rows()
-        .into_iter()
-        .enumerate()
-        .map(|(row, outcome)| match outcome {
-            RowOutcome::Success(outputs) => {
-                outputs
-                    .validate_against(schema)
-                    .map_err(|error| EvaluationDatasetError::InvalidOutputRow { row, error })?;
-                match outputs.value(output) {
-                    Some(Value::Bool(value)) => Ok(*value),
-                    // Validation above proved the slot holds a Boolean.
-                    _ => Err(EvaluationDatasetError::InvalidOutputRow {
-                        row,
-                        error: OutputRowError::KindMismatch {
-                            output: selected.name().clone(),
-                        },
-                    }),
-                }
+                output_count: self.schema().outputs().len(),
             }
-            RowOutcome::Failure(failure) => Err(EvaluationDatasetError::FailedRow { row, failure }),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        })?;
+        if selected.wire() != &WireType::Bool {
+            return Err(EvaluationDatasetError::NonBooleanOutput {
+                output: selected.name().clone(),
+                wire: selected.wire().clone(),
+            });
+        }
+        self.evaluations()
+            .iter()
+            .flat_map(|evaluation| {
+                evaluation
+                    .rows()
+                    .iter()
+                    .enumerate()
+                    .map(move |(row, outcome)| (evaluation.id(), row, outcome))
+            })
+            .map(|(id, row, outcome)| match outcome {
+                // The table validated every successful row against the
+                // session, so the value is Boolean.
+                RowOutcome::Success(outputs) => match outputs.value(output) {
+                    Some(Value::Bool(value)) => Ok(*value),
+                    _ => Err(EvaluationDatasetError::NonBooleanOutput {
+                        output: selected.name().clone(),
+                        wire: selected.wire().clone(),
+                    }),
+                },
+                RowOutcome::Failure(failure) => Err(EvaluationDatasetError::FailedRow {
+                    id,
+                    row,
+                    failure: failure.clone(),
+                }),
+            })
+            .collect()
+    }
 
-    let features = schema
-        .inputs()
-        .iter()
-        .zip(request.into_inputs().columns())
-        .map(|(input, column)| input_feature(input, column))
-        .collect::<Result<Vec<_>, _>>()?;
-    Dataset::new(features, cases_of_interest).map_err(Into::into)
+    /// Builds a PRIM dataset from every input (see
+    /// [`EvaluationTable::features`]) and the Boolean `output` (see
+    /// [`EvaluationTable::cases`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvaluationDatasetError`] when the cases cannot be read, an
+    /// input cannot become a feature, or the dataset is invalid.
+    pub fn dataset(&self, output: OutputSlot) -> Result<Dataset, EvaluationDatasetError> {
+        let cases = self.cases(output)?;
+        Ok(Dataset::new(self.features()?, cases)?)
+    }
+}
+
+/// Joins the columns of one input across evaluations, in order.
+///
+/// Every column was validated against the same input, so all share the
+/// variant of the first; an empty list yields an empty quantity column.
+fn concatenate(columns: &[&InputColumn]) -> InputColumn {
+    fn join<T: Clone>(
+        columns: &[&InputColumn],
+        values: impl Fn(&InputColumn) -> Option<&[T]>,
+    ) -> Vec<T> {
+        columns
+            .iter()
+            .filter_map(|column| values(column))
+            .flatten()
+            .cloned()
+            .collect()
+    }
+    match columns.first() {
+        None | Some(InputColumn::Quantity(_)) => {
+            InputColumn::Quantity(join(columns, |column| match column {
+                InputColumn::Quantity(values) => Some(values),
+                _ => None,
+            }))
+        }
+        Some(InputColumn::Datetime(_)) => {
+            InputColumn::Datetime(join(columns, |column| match column {
+                InputColumn::Datetime(values) => Some(values),
+                _ => None,
+            }))
+        }
+        Some(InputColumn::Int(_)) => InputColumn::Int(join(columns, |column| match column {
+            InputColumn::Int(values) => Some(values),
+            _ => None,
+        })),
+        Some(InputColumn::Bool(_)) => InputColumn::Bool(join(columns, |column| match column {
+            InputColumn::Bool(values) => Some(values),
+            _ => None,
+        })),
+        Some(InputColumn::Key(_)) => InputColumn::Key(join(columns, |column| match column {
+            InputColumn::Key(values) => Some(values),
+            _ => None,
+        })),
+        Some(InputColumn::Complex(_)) => {
+            InputColumn::Complex(join(columns, |column| match column {
+                InputColumn::Complex(values) => Some(values),
+                _ => None,
+            }))
+        }
+        Some(InputColumn::Structured(_)) => {
+            InputColumn::Structured(join(columns, |column| match column {
+                InputColumn::Structured(values) => Some(values),
+                _ => None,
+            }))
+        }
+    }
 }
 
 fn input_feature(input: &SessionInput, column: &InputColumn) -> Result<Feature, DataError> {
@@ -233,12 +265,28 @@ fn key_labels(key: &KeyType) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use graphcal_model_protocol::{FiniteF64, RequestBatch, RowFailure as ProtocolRowFailure};
+    use std::sync::Arc;
+
+    use graphcal_model_protocol::{
+        FiniteF64, RequestBatch, RowFailure as ProtocolRowFailure, SessionSchema,
+    };
 
     use super::*;
     use crate::{
-        Evaluator, FeatureView, InProcessEvaluator, InputRow, ModelSchemaBuilder, RowContext,
+        ChunkResult, EvalRequest, Evaluator, FeatureView, InProcessEvaluator, InputRow,
+        ModelSchemaBuilder, RowContext,
     };
+
+    fn table(
+        schema: &Arc<SessionSchema>,
+        evaluations: impl IntoIterator<Item = (EvalRequest, ChunkResult)>,
+    ) -> EvaluationTable {
+        let mut table = EvaluationTable::new(Arc::clone(schema));
+        for (request, result) in evaluations {
+            table.push(request, result).unwrap();
+        }
+        table
+    }
 
     #[test]
     fn key_labels_name_fin_positions_and_coordinates() {
@@ -285,6 +333,10 @@ mod tests {
     }
 
     fn request(schema: &Arc<SessionSchema>) -> EvalRequest {
+        request_with_id(schema, 1)
+    }
+
+    fn request_with_id(schema: &Arc<SessionSchema>, id: u128) -> EvalRequest {
         let WireType::Key(mode) = schema.inputs()[2].wire() else {
             panic!("mode must be a key input");
         };
@@ -307,7 +359,7 @@ mod tests {
             ],
         )
         .unwrap();
-        EvalRequest::new(EvaluationId::new(1), 0, inputs)
+        EvalRequest::new(EvaluationId::new(id), 0, inputs)
     }
 
     fn evaluate(schema: &Arc<SessionSchema>, request: &EvalRequest) -> ChunkResult {
@@ -349,7 +401,9 @@ mod tests {
             .unwrap()
             .unwrap();
         let failure = schema.output_slot("failure").unwrap();
-        let dataset = evaluation_to_dataset(&schema, request, result, failure).unwrap();
+        let dataset = table(&schema, [(request, result)])
+            .dataset(failure)
+            .unwrap();
 
         assert_eq!(dataset.cases_of_interest(), [false, true, false]);
         let views = dataset.feature_views().collect::<Vec<_>>();
@@ -382,11 +436,13 @@ mod tests {
         let result = evaluate(&schema, &request);
         let failure = schema.output_slot("failure").unwrap();
 
+        let table = table(&schema, [(request, result)]);
         assert!(matches!(
-            evaluation_to_dataset(&schema, request, result, failure),
+            table.dataset(failure),
             Err(EvaluationDatasetError::FailedRow {
                 row: 2,
-                failure: RowFailure::Model(ProtocolRowFailure::EvaluationError { .. })
+                failure: RowFailure::Model(ProtocolRowFailure::EvaluationError { .. }),
+                ..
             })
         ));
     }
@@ -399,24 +455,59 @@ mod tests {
         let count = schema.output_slot("count").unwrap();
 
         assert!(matches!(
-            evaluation_to_dataset(&schema, request, result, count),
+            table(&schema, [(request, result)]).cases(count),
             Err(EvaluationDatasetError::NonBooleanOutput { output, wire: WireType::Int })
                 if output.as_str() == "count"
         ));
     }
 
     #[test]
-    fn conversion_rejects_mismatched_ids() {
+    fn features_and_cases_span_every_evaluation_in_order() {
         let schema = schema();
-        let request = request(&schema);
-        let result = evaluate(&schema, &request);
-        let other = EvalRequest::new(EvaluationId::new(2), 0, request.into_inputs());
-        let failure = schema.output_slot("failure").unwrap();
+        let n = schema.input_slot("n").unwrap();
+        let evaluator = InProcessEvaluator::new(
+            Arc::clone(&schema),
+            move |row: InputRow<'_>, _: RowContext| {
+                let n = row.int(n)?;
+                Ok(vec![Value::Int(n), Value::Bool(n == 1)])
+            },
+        );
+        let requests = [request_with_id(&schema, 1), request_with_id(&schema, 2)];
+        let results = evaluator
+            .evaluate(requests.to_vec())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let table = table(&schema, requests.into_iter().zip(results));
 
+        let features = table.features().unwrap();
+        assert_eq!(features[1].integer_values(), Some(&[0, 1, 2, 0, 1, 2][..]));
+        let failure = schema.output_slot("failure").unwrap();
+        assert_eq!(
+            table.cases(failure).unwrap(),
+            [false, true, false, false, true, false]
+        );
+        let wider = ModelSchemaBuilder::new()
+            .continuous("x", 0.0, 1.0)
+            .unwrap()
+            .boolean_output("a")
+            .unwrap()
+            .boolean_output("b")
+            .unwrap()
+            .boolean_output("c")
+            .unwrap()
+            .build()
+            .unwrap();
         assert!(matches!(
-            evaluation_to_dataset(&schema, other, result, failure),
-            Err(EvaluationDatasetError::MismatchedId { .. })
+            table.cases(wider.output_slot("c").unwrap()),
+            Err(EvaluationDatasetError::OutputSlotOutOfBounds { slot: 2, .. })
         ));
+    }
+
+    #[test]
+    fn empty_tables_have_no_dataset() {
+        let schema = schema();
+        let failure = schema.output_slot("failure").unwrap();
+        assert!(EvaluationTable::new(schema).dataset(failure).is_err());
     }
 
     #[test]

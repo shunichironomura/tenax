@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use tenax::graphcal_model_client::{Bool, GraphcalCommand, Key, Model, Quantity};
 use tenax::{
-    Evaluator, GraphcalEvaluator, Objective, Prim, PrimConfig, Restriction, RowOutcome,
-    evaluation_to_dataset, sample_latin_hypercube,
+    EvaluationTable, Evaluator, GraphcalEvaluator, Objective, Prim, PrimConfig, Restriction,
+    RowOutcome, sample_latin_hypercube,
 };
 
 const MODEL: &str = "pub index Mode = { Stable, Fragile };\n\
@@ -61,7 +61,9 @@ fn latin_hypercube_through_graphcal_recovers_the_known_failure_region() {
     );
     evaluator.shutdown().unwrap();
 
-    let dataset = evaluation_to_dataset(&schema, retained_request, result, failure_slot).unwrap();
+    let mut table = EvaluationTable::new(schema);
+    table.push(retained_request, result).unwrap();
+    let dataset = table.dataset(failure_slot).unwrap();
     let config = PrimConfig::new(0.05, 0.05, 0.05, Objective::Lenient1).unwrap();
     let discovered = Prim::new(&dataset, config).find_box().unwrap();
     let final_step = discovered.final_step();
