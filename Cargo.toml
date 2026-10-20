@@ -2,7 +2,7 @@
 
 [package]
 name = "tenax"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 rust-version = "1.99"
 description = "Scenario discovery and robust decision-making under deep uncertainty"
