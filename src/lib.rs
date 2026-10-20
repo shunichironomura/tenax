@@ -78,6 +78,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod case_rule;
 mod data;
 mod error;
 mod evaluation;
@@ -106,6 +107,7 @@ pub use arrow_schema;
 pub use graphcal_model_client;
 pub use graphcal_model_protocol;
 
+pub use case_rule::{CaseRule, Comparison};
 pub use data::{CategoricalView, Dataset, Feature, FeatureKind, FeatureView};
 pub use error::{DataError, PrimError};
 pub use evaluation::{

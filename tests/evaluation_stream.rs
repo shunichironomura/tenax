@@ -8,11 +8,11 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tenax::graphcal_model_protocol::{QuantityType, RowFailure, Value};
+use tenax::graphcal_model_protocol::{FiniteF64, QuantityType, RowFailure, Value};
 use tenax::{
-    ChunkingPolicy, EvaluatedRequest, EvaluationReader, EvaluationWriter, Evaluator, InputRow,
-    ModelSchemaBuilder, Objective, ParallelInProcessEvaluator, Prim, PrimConfig, RowContext,
-    sample_latin_hypercube,
+    CaseRule, ChunkingPolicy, Comparison, EvaluatedRequest, EvaluationReader, EvaluationWriter,
+    Evaluator, InputRow, ModelSchemaBuilder, Objective, ParallelInProcessEvaluator, Prim,
+    PrimConfig, Restriction, RowContext, sample_latin_hypercube,
 };
 
 #[test]
@@ -39,9 +39,7 @@ fn stored_evaluations_feed_prim_after_reading_back() {
         move |row: InputRow<'_>, _context: RowContext| -> Result<Vec<Value>, RowFailure> {
             let load = row.quantity(load)?;
             Ok(vec![
-                Value::Quantity(
-                    tenax::graphcal_model_protocol::FiniteF64::new(load * 2.0).unwrap(),
-                ),
+                Value::Quantity(FiniteF64::new(load * 2.0).unwrap()),
                 Value::Bool(load >= 0.7),
             ])
         },
@@ -75,4 +73,18 @@ fn stored_evaluations_feed_prim_after_reading_back() {
     let config = PrimConfig::new(0.05, 0.05, 0.05, Objective::Lenient1).unwrap();
     let discovered = Prim::new(&dataset, config).find_box().unwrap();
     assert!(discovered.final_step().statistics().density() >= 0.99);
+
+    // The same stored evaluation answers a different question without
+    // re-evaluating the model.
+    let stress = table.schema().output_slot("stress").unwrap();
+    let high_stress = CaseRule::Quantity {
+        comparison: Comparison::AtLeast,
+        threshold: FiniteF64::new(1.8).unwrap(),
+    };
+    let dataset = table.dataset_where(stress, &high_stress).unwrap();
+    let discovered = Prim::new(&dataset, config).find_box().unwrap();
+    let Some(Restriction::Continuous(load)) = discovered.final_step().limits().get("load") else {
+        panic!("PRIM did not return continuous load limits");
+    };
+    assert!((0.88..=0.92).contains(&load.lower()));
 }

@@ -1,11 +1,13 @@
 //! Conversion of completed evaluations into static PRIM datasets.
 
 use graphcal_model_protocol::{
-    InputColumn, KeyRef, KeyType, OutputSlot, PortName, SessionInput, Value, WireType,
+    InputColumn, KeyRef, KeyType, OutputSlot, PortName, SessionInput, SessionOutput, Value,
+    WireType,
 };
 use thiserror::Error;
 
 use crate::DataError;
+use crate::case_rule::CaseRule;
 use crate::data::{Dataset, Feature};
 use crate::evaluation::{EvaluationId, RowFailure, RowOutcome};
 use crate::evaluation_table::EvaluationTable;
@@ -25,10 +27,9 @@ pub enum EvaluationDatasetError {
         output_count: usize,
     },
 
-    /// The chosen output is not Boolean, so it cannot classify cases of
-    /// interest.
-    #[error("output '{output}' is not a Boolean output")]
-    NonBooleanOutput {
+    /// The case rule cannot classify values of the chosen output.
+    #[error("the case rule does not apply to output '{output}'")]
+    InapplicableRule {
         /// The chosen output.
         output: PortName,
         /// Its wire type.
@@ -88,25 +89,86 @@ impl EvaluationTable {
     /// Reads the Boolean `output` of every row as its case-of-interest
     /// classification, in table order.
     ///
+    /// This is [`EvaluationTable::cases_where`] with [`CaseRule::IsTrue`].
+    ///
     /// # Errors
     ///
     /// Returns [`EvaluationDatasetError`] when `output` is out of range or not
-    /// Boolean, or when any row failed. Failed rows are rejected rather than
-    /// silently dropped; a caller that wants another missing-evaluation
-    /// policy must apply it explicitly before classifying.
+    /// Boolean, or when any row failed.
     pub fn cases(&self, output: OutputSlot) -> Result<Vec<bool>, EvaluationDatasetError> {
-        let selected = self.schema().output(output).ok_or_else(|| {
-            EvaluationDatasetError::OutputSlotOutOfBounds {
+        self.cases_where(output, &CaseRule::IsTrue)
+    }
+
+    /// Classifies every row by applying `rule` to its value of `output`, in
+    /// table order.
+    ///
+    /// Failed rows are rejected rather than silently dropped; a caller that
+    /// wants another missing-evaluation policy must apply it explicitly
+    /// before classifying.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvaluationDatasetError`] when `output` is out of range, the
+    /// rule does not apply to the output's wire type (including a key that is
+    /// not an entry of the output's axis), or any row failed.
+    pub fn cases_where(
+        &self,
+        output: OutputSlot,
+        rule: &CaseRule,
+    ) -> Result<Vec<bool>, EvaluationDatasetError> {
+        let selected = self.selected_output(output)?;
+        let inapplicable = || EvaluationDatasetError::InapplicableRule {
+            output: selected.name().clone(),
+            wire: selected.wire().clone(),
+        };
+        if !rule.applies_to(selected.wire()) {
+            return Err(inapplicable());
+        }
+        // The table validated every successful row against the session, so
+        // each value has the output's wire type, which the rule applies to.
+        self.classify(output, |value| {
+            rule.classify(value).ok_or_else(inapplicable)
+        })
+    }
+
+    /// Classifies every row by calling `classify` on its value of `output`,
+    /// in table order.
+    ///
+    /// Use this for a classification that [`CaseRule`] cannot express, such
+    /// as one over an indexed or algebraic output. Values are in the output's
+    /// wire unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvaluationDatasetError`] when `output` is out of range or any
+    /// row failed.
+    pub fn cases_by(
+        &self,
+        output: OutputSlot,
+        mut classify: impl FnMut(&Value) -> bool,
+    ) -> Result<Vec<bool>, EvaluationDatasetError> {
+        self.selected_output(output)?;
+        self.classify(output, |value| Ok(classify(value)))
+    }
+
+    fn selected_output(
+        &self,
+        output: OutputSlot,
+    ) -> Result<&SessionOutput, EvaluationDatasetError> {
+        self.schema()
+            .output(output)
+            .ok_or_else(|| EvaluationDatasetError::OutputSlotOutOfBounds {
                 slot: output.get(),
                 output_count: self.schema().outputs().len(),
-            }
-        })?;
-        if selected.wire() != &WireType::Bool {
-            return Err(EvaluationDatasetError::NonBooleanOutput {
-                output: selected.name().clone(),
-                wire: selected.wire().clone(),
-            });
-        }
+            })
+    }
+
+    /// Classifies the value of `output` in every row; `output` is in range.
+    fn classify(
+        &self,
+        output: OutputSlot,
+        mut classify: impl FnMut(&Value) -> Result<bool, EvaluationDatasetError>,
+    ) -> Result<Vec<bool>, EvaluationDatasetError> {
         self.evaluations()
             .iter()
             .flat_map(|evaluation| {
@@ -117,15 +179,15 @@ impl EvaluationTable {
                     .map(move |(row, outcome)| (evaluation.id(), row, outcome))
             })
             .map(|(id, row, outcome)| match outcome {
-                // The table validated every successful row against the
-                // session, so the value is Boolean.
-                RowOutcome::Success(outputs) => match outputs.value(output) {
-                    Some(Value::Bool(value)) => Ok(*value),
-                    _ => Err(EvaluationDatasetError::NonBooleanOutput {
-                        output: selected.name().clone(),
-                        wire: selected.wire().clone(),
-                    }),
-                },
+                RowOutcome::Success(outputs) => outputs.value(output).map_or_else(
+                    || {
+                        Err(EvaluationDatasetError::OutputSlotOutOfBounds {
+                            slot: output.get(),
+                            output_count: outputs.values().len(),
+                        })
+                    },
+                    &mut classify,
+                ),
                 RowOutcome::Failure(failure) => Err(EvaluationDatasetError::FailedRow {
                     id,
                     row,
@@ -144,7 +206,23 @@ impl EvaluationTable {
     /// Returns [`EvaluationDatasetError`] when the cases cannot be read, an
     /// input cannot become a feature, or the dataset is invalid.
     pub fn dataset(&self, output: OutputSlot) -> Result<Dataset, EvaluationDatasetError> {
-        let cases = self.cases(output)?;
+        self.dataset_where(output, &CaseRule::IsTrue)
+    }
+
+    /// Builds a PRIM dataset from every input (see
+    /// [`EvaluationTable::features`]) and `rule` applied to `output` (see
+    /// [`EvaluationTable::cases_where`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvaluationDatasetError`] when the cases cannot be classified,
+    /// an input cannot become a feature, or the dataset is invalid.
+    pub fn dataset_where(
+        &self,
+        output: OutputSlot,
+        rule: &CaseRule,
+    ) -> Result<Dataset, EvaluationDatasetError> {
+        let cases = self.cases_where(output, rule)?;
         Ok(Dataset::new(self.features()?, cases)?)
     }
 }
@@ -456,7 +534,7 @@ mod tests {
 
         assert!(matches!(
             table(&schema, [(request, result)]).cases(count),
-            Err(EvaluationDatasetError::NonBooleanOutput { output, wire: WireType::Int })
+            Err(EvaluationDatasetError::InapplicableRule { output, wire: WireType::Int })
                 if output.as_str() == "count"
         ));
     }
@@ -500,6 +578,117 @@ mod tests {
         assert!(matches!(
             table.cases(wider.output_slot("c").unwrap()),
             Err(EvaluationDatasetError::OutputSlotOutOfBounds { slot: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn rules_classify_non_boolean_outputs() {
+        let schema = schema();
+        let n = schema.input_slot("n").unwrap();
+        let evaluator = InProcessEvaluator::new(
+            Arc::clone(&schema),
+            move |row: InputRow<'_>, _: RowContext| {
+                let n = row.int(n)?;
+                Ok(vec![Value::Int(n), Value::Bool(n == 1)])
+            },
+        );
+        let request = request(&schema);
+        let result = evaluator
+            .evaluate(vec![request.clone()])
+            .next()
+            .unwrap()
+            .unwrap();
+        let table = table(&schema, [(request, result)]);
+        let count = schema.output_slot("count").unwrap();
+
+        let at_least_one = CaseRule::Integer {
+            comparison: crate::Comparison::AtLeast,
+            threshold: 1,
+        };
+        assert_eq!(
+            table.cases_where(count, &at_least_one).unwrap(),
+            [false, true, true]
+        );
+        assert_eq!(
+            table
+                .cases_by(count, |value| matches!(value, Value::Int(2)))
+                .unwrap(),
+            [false, false, true]
+        );
+        let dataset = table.dataset_where(count, &at_least_one).unwrap();
+        assert_eq!(dataset.cases_of_interest(), [false, true, true]);
+
+        let quantity = CaseRule::Quantity {
+            comparison: crate::Comparison::Below,
+            threshold: FiniteF64::new(1.0).unwrap(),
+        };
+        assert!(matches!(
+            table.cases_where(count, &quantity),
+            Err(EvaluationDatasetError::InapplicableRule { .. })
+        ));
+    }
+
+    #[test]
+    fn key_rules_must_name_entries_of_the_output_axis() {
+        use graphcal_model_protocol::{KeyValue, VariantName};
+
+        let schema = ModelSchemaBuilder::new()
+            .continuous("x", 0.0, 1.0)
+            .unwrap()
+            .key_output("verdict", "Verdict", ["pass", "fail"])
+            .unwrap()
+            .build()
+            .unwrap();
+        let x = schema.input_slot("x").unwrap();
+        let evaluator = InProcessEvaluator::new(
+            Arc::clone(&schema),
+            move |row: InputRow<'_>, _: RowContext| {
+                let verdict = if row.quantity(x)? > 0.5 {
+                    "fail"
+                } else {
+                    "pass"
+                };
+                Ok(vec![Value::Key(KeyValue::Variant(
+                    VariantName::new(verdict).unwrap(),
+                ))])
+            },
+        );
+        let request = crate::sample_uniform(&schema, 50, 3, 0).unwrap();
+        let result = evaluator
+            .evaluate(vec![request.clone()])
+            .next()
+            .unwrap()
+            .unwrap();
+        let table = table(&schema, [(request, result)]);
+        let verdict = schema.output_slot("verdict").unwrap();
+        let variant = |name| KeyValue::Variant(VariantName::new(name).unwrap());
+
+        let failed = table
+            .cases_where(
+                verdict,
+                &CaseRule::KeyIn {
+                    keys: vec![variant("fail")],
+                },
+            )
+            .unwrap();
+        let x_values = table.features().unwrap()[0]
+            .continuous_values()
+            .unwrap()
+            .to_vec();
+        assert!(
+            failed
+                .iter()
+                .zip(&x_values)
+                .all(|(failed, x)| *failed == (*x > 0.5))
+        );
+        assert!(matches!(
+            table.cases_where(
+                verdict,
+                &CaseRule::KeyIn {
+                    keys: vec![variant("unknown")],
+                },
+            ),
+            Err(EvaluationDatasetError::InapplicableRule { .. })
         ));
     }
 
