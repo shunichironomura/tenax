@@ -84,6 +84,8 @@ mod evaluation;
 #[cfg(feature = "arrow")]
 mod evaluation_arrow;
 mod evaluation_dataset;
+#[cfg(feature = "arrow")]
+mod evaluation_ipc;
 mod evaluation_table;
 #[cfg(feature = "graphcal")]
 mod graphcal;
@@ -116,6 +118,10 @@ pub use evaluation_arrow::{
     evaluation_schema,
 };
 pub use evaluation_dataset::EvaluationDatasetError;
+#[cfg(feature = "arrow")]
+pub use evaluation_ipc::{
+    EvaluationReadError, EvaluationReader, EvaluationWriteError, EvaluationWriter, RecoveredTable,
+};
 pub use evaluation_table::{EvaluatedRequest, EvaluationTable, EvaluationTableError};
 #[cfg(feature = "graphcal")]
 pub use graphcal::GraphcalEvaluator;
