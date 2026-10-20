@@ -531,6 +531,10 @@ impl EvaluationDecoder {
         })
     }
 
+    pub const fn session(&self) -> &Arc<SessionSchema> {
+        &self.session
+    }
+
     pub fn push(&mut self, batch: &RecordBatch) -> Result<(), EvaluationDecodeError> {
         if batch.schema().fields() != self.schema.fields() {
             return Err(EvaluationDecodeError::BatchSchema);
