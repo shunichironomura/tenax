@@ -348,9 +348,9 @@ dependencies = [
 
 [[package]]
 name = "graphcal-model-client"
-version = "0.0.1-alpha.40"
+version = "0.0.1-alpha.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fba7cb49f6720d3ddc9298f811038dfc53510d6c4198e003c35e02309e3cf60"
+checksum = "fa649bd92354bb80da5542fc62a524b8a253ac8e19fc8818774cbdacb5517b71"
 dependencies = [
  "arrow-ipc",
  "arrow-schema",
@@ -361,9 +361,9 @@ dependencies = [
 
 [[package]]
 name = "graphcal-model-protocol"
-version = "0.0.1-alpha.40"
+version = "0.0.1-alpha.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab1ff748c65ad6d19cd89d3a6c21fb2bf64cbe6c6d86f8675f87dff3ee3f2b2"
+checksum = "a22b829025c2045e3781ad0336de112dbaa1cc65d5d11a3d85257b22b54394d1"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "tenax"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
