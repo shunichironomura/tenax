@@ -36,6 +36,11 @@ impl Comparison {
 pub enum CaseRule {
     /// A Boolean output is `true`.
     IsTrue,
+    /// A Boolean output is `false`.
+    ///
+    /// Unlike negating a [`crate::CaseCondition`] with [`CaseRule::IsTrue`],
+    /// this does not hold for a row without a value at a path.
+    IsFalse,
     /// A quantity output compares with `threshold`.
     Quantity {
         /// How the value compares with the threshold.
@@ -69,7 +74,7 @@ impl CaseRule {
     /// every listed key is an entry of a key output's axis.
     pub(crate) fn applies_to(&self, wire: &WireType) -> bool {
         match (self, wire) {
-            (Self::IsTrue, WireType::Bool)
+            (Self::IsTrue | Self::IsFalse, WireType::Bool)
             | (Self::Quantity { .. }, WireType::Quantity(_))
             | (Self::Datetime { .. }, WireType::Datetime(_))
             | (Self::Integer { .. }, WireType::Int) => true,
@@ -85,6 +90,7 @@ impl CaseRule {
     pub(crate) fn classify(&self, value: &Value) -> Option<bool> {
         Some(match (self, value) {
             (Self::IsTrue, Value::Bool(value)) => *value,
+            (Self::IsFalse, Value::Bool(value)) => !*value,
             (
                 Self::Quantity {
                     comparison,
@@ -155,5 +161,14 @@ mod tests {
         };
         assert_eq!(rule.classify(&Value::Key(variant("risky"))), Some(true));
         assert_eq!(rule.classify(&Value::Key(variant("safe"))), Some(false));
+    }
+
+    #[test]
+    fn boolean_rules_classify_either_value() {
+        assert_eq!(CaseRule::IsTrue.classify(&Value::Bool(true)), Some(true));
+        assert_eq!(CaseRule::IsFalse.classify(&Value::Bool(true)), Some(false));
+        assert_eq!(CaseRule::IsFalse.classify(&Value::Bool(false)), Some(true));
+        assert!(CaseRule::IsFalse.applies_to(&WireType::Bool));
+        assert!(!CaseRule::IsFalse.applies_to(&WireType::Int));
     }
 }

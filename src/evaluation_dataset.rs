@@ -7,6 +7,7 @@ use graphcal_model_protocol::{
 use thiserror::Error;
 
 use crate::DataError;
+use crate::case_condition::{CaseCondition, CaseConditionError};
 use crate::case_rule::CaseRule;
 use crate::data::{Dataset, Feature};
 use crate::evaluation::{EvaluationId, RowFailure, RowOutcome};
@@ -45,6 +46,24 @@ pub enum EvaluationDatasetError {
         row: usize,
         /// Explicit failure data.
         failure: RowFailure,
+    },
+
+    /// A path of a case condition was resolved against another session.
+    #[error("'{path}' was resolved against another session")]
+    ForeignPath {
+        /// The path.
+        path: String,
+    },
+
+    /// A case condition cannot classify a row.
+    #[error("row {row} of evaluation {id}: {error}")]
+    Condition {
+        /// Evaluation request identifier.
+        id: EvaluationId,
+        /// Zero-based row position within the request.
+        row: usize,
+        /// Why the condition does not apply.
+        error: CaseConditionError,
     },
 
     /// The resulting static dataset violates a dataset invariant.
@@ -149,6 +168,67 @@ impl EvaluationTable {
     ) -> Result<Vec<bool>, EvaluationDatasetError> {
         self.selected_output(output)?;
         self.classify(output, |value| Ok(classify(value)))
+    }
+
+    /// Classifies every row with `condition`, in table order.
+    ///
+    /// Failed rows are rejected, as by [`EvaluationTable::cases_where`]. To
+    /// apply another failure policy, classify the successful rows with
+    /// [`CaseCondition::classify`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvaluationDatasetError::ForeignPath`] when a path of
+    /// `condition` belongs to another session,
+    /// [`EvaluationDatasetError::Condition`] when a row has no value where
+    /// `condition` rejects absent values, and
+    /// [`EvaluationDatasetError::FailedRow`] when any row failed.
+    pub fn cases_matching(
+        &self,
+        condition: &CaseCondition,
+    ) -> Result<Vec<bool>, EvaluationDatasetError> {
+        if let Some(path) = condition.first_foreign_path(self.schema()) {
+            return Err(EvaluationDatasetError::ForeignPath {
+                path: path.to_string(),
+            });
+        }
+        self.evaluations()
+            .iter()
+            .flat_map(|evaluation| {
+                evaluation
+                    .rows()
+                    .iter()
+                    .enumerate()
+                    .map(move |(row, outcome)| (evaluation.id(), row, outcome))
+            })
+            .map(|(id, row, outcome)| match outcome {
+                RowOutcome::Success(outputs) => condition
+                    .classify(outputs)
+                    .map_err(|error| EvaluationDatasetError::Condition { id, row, error }),
+                RowOutcome::Failure(failure) => Err(EvaluationDatasetError::FailedRow {
+                    id,
+                    row,
+                    failure: failure.clone(),
+                }),
+            })
+            .collect()
+    }
+
+    /// Builds a PRIM dataset from every input (see
+    /// [`EvaluationTable::features`]) and `condition` (see
+    /// [`EvaluationTable::cases_matching`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvaluationDatasetError`] when the cases cannot be
+    /// classified, an input cannot become a feature, or the dataset is
+    /// invalid.
+    pub fn dataset_matching(
+        &self,
+        condition: &CaseCondition,
+    ) -> Result<Dataset, EvaluationDatasetError> {
+        let cases = self.cases_matching(condition)?;
+        Ok(Dataset::new(self.features()?, cases)?)
     }
 
     fn selected_output(
@@ -333,12 +413,19 @@ fn input_feature(input: &SessionInput, column: &InputColumn) -> Result<Feature, 
 fn key_labels(key: &KeyType) -> Vec<String> {
     key.positions()
         .filter_map(|position| key.key(position))
-        .map(|entry| match entry {
-            KeyRef::Variant(variant) => variant.as_str().to_owned(),
-            KeyRef::Position(position) => position.to_string(),
-            KeyRef::Coordinate(coordinate) => coordinate.get().to_string(),
-        })
+        .map(key_label)
         .collect()
+}
+
+/// The category label PRIM features give a key entry: its variant name, its
+/// `Fin` position, or its coordinate in its SI unit.
+#[must_use]
+pub fn key_label(key: KeyRef<'_>) -> String {
+    match key {
+        KeyRef::Variant(variant) => variant.as_str().to_owned(),
+        KeyRef::Position(position) => position.to_string(),
+        KeyRef::Coordinate(coordinate) => coordinate.get().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -734,5 +821,93 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn conditions_classify_structured_outputs_row_by_row() {
+        use crate::evaluation::{OutputRow, RowFailure};
+        use crate::structured_fixture::{report_session, report_value};
+        use crate::{AbsentValue, CaseCondition, Comparison, OutputPath};
+
+        let schema = report_session();
+        let request = EvalRequest::new(
+            EvaluationId::new(1),
+            0,
+            RequestBatch::new(
+                Arc::clone(&schema),
+                vec![InputColumn::Quantity(
+                    [0.1, 0.5, 0.9].map(|x| FiniteF64::new(x).unwrap()).to_vec(),
+                )],
+            )
+            .unwrap(),
+        );
+        let success = |value| RowOutcome::Success(OutputRow::new(&schema, vec![value]).unwrap());
+        let mut table = EvaluationTable::new(Arc::clone(&schema));
+        table
+            .push(
+                request.clone(),
+                ChunkResult::new(
+                    EvaluationId::new(1),
+                    vec![
+                        success(report_value(1.0, Some(30.0), [true, true], "Good")),
+                        success(report_value(1.0, None, [true, true], "Good")),
+                        success(report_value(1.0, Some(90.0), [true, true], "Good")),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let condition = CaseCondition::at(
+            OutputPath::parse(&schema, "report.latency.Available.p90").unwrap(),
+            CaseRule::Quantity {
+                comparison: Comparison::AtMost,
+                threshold: FiniteF64::new(60.0).unwrap(),
+            },
+            AbsentValue::NotACase,
+        )
+        .unwrap();
+        assert_eq!(
+            table.cases_matching(&condition),
+            Ok(vec![true, false, false])
+        );
+        assert_eq!(table.dataset_matching(&condition).unwrap().case_count(), 1);
+
+        let mut failed = EvaluationTable::new(Arc::clone(&schema));
+        failed
+            .push(
+                request,
+                ChunkResult::new(
+                    EvaluationId::new(1),
+                    vec![
+                        success(report_value(1.0, Some(30.0), [true, true], "Good")),
+                        RowOutcome::Failure(RowFailure::Model(
+                            ProtocolRowFailure::EvaluationError {
+                                message: "boom".to_owned(),
+                            },
+                        )),
+                        success(report_value(1.0, Some(90.0), [true, true], "Good")),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            failed.cases_matching(&condition),
+            Err(EvaluationDatasetError::FailedRow { row: 1, .. })
+        ));
+
+        let other = ModelSchemaBuilder::new()
+            .continuous("x", 0.0, 1.0)
+            .unwrap()
+            .boolean_output("report")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            EvaluationTable::new(other).cases_matching(&condition),
+            Err(EvaluationDatasetError::ForeignPath {
+                path: "report.latency.Available.p90".to_owned()
+            })
+        );
     }
 }
