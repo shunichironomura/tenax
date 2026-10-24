@@ -19,6 +19,7 @@ Tenax currently provides a complete path from a Graphcal model or an in-process 
 - Per-row success or failure data: failed assertions, out-of-domain inputs, and evaluation errors reported by the model, plus caught unwinding panics and invalid outputs.
 - Sequential and Rayon-parallel in-process closure evaluators, with an explicit fixed-row work-chunk policy and completion-order result streaming.
 - A `GraphcalEvaluator` (optional `graphcal` feature) that drives a Graphcal model through a persistent `graphcal model serve` session.
+- Splitting of one request into consecutive row chunks with stable identifiers, and an `EvaluatorPool` that evaluates the chunks on several evaluators of one session schema at once, such as several Graphcal sessions, streaming results in completion order.
 - An `EvaluationTable` that keeps every input, every output, and every row outcome (failed rows included) of any number of evaluations of one session.
 - Explicit conversion of an evaluation table into a static PRIM dataset, classifying cases of interest from a Boolean output, a threshold on a quantity, datetime, or integer output, key membership, or a closure; failed rows are rejected rather than silently dropped.
 - Self-describing storage of evaluation tables as Arrow IPC streams (optional `arrow` feature), readable back into Tenax without the model and directly by pyarrow and polars.
@@ -30,6 +31,8 @@ Tenax also implements conventional Patient Rule Induction Method (PRIM) analysis
 - Quantile-based peeling, data-aware categorical peeling, and pasting.
 - Complete candidate trajectories with box limits, member row indices, coverage, density, mass, restricted-dimension counts, and one-sided quasi-p values.
 - Repeated box discovery with the members of each final box removed from subsequent searches.
+- Explicit selection of one candidate from a trajectory: the best harmonic mean of coverage and density, or the largest coverage above a minimum density, among candidates with a bounded number of restricted features, optionally excluding the unrestricted box.
+- Restriction effects: each restriction of a candidate measured by re-counting the box without it, with the resulting density gain.
 
 `true` output values identify the cases of interest. A minimal analysis looks like this:
 
@@ -57,6 +60,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{:?}", candidate.statistics());
     }
     Ok(())
+}
+```
+
+Peeling trades coverage for density, so the trajectory has no single best box. A `CandidateSelection` chooses one candidate explicitly, and `restriction_effects` shows how much each of its restrictions raises the density, so that restrictions which add little can be recognized:
+
+```rust
+use tenax::{CandidateSelection, MinimumDensity, SelectionObjective};
+
+let selection = CandidateSelection::new(
+    4,
+    SelectionObjective::HighDensity(MinimumDensity::new(0.8)?),
+);
+if let Some(position) = first_box.select_candidate(selection) {
+    for effect in first_box.restriction_effects(&data, position)? {
+        println!("{}: density +{:.2}", effect.limit().name(), effect.density_gain());
+    }
 }
 ```
 
@@ -138,6 +157,38 @@ Graphcal models are deterministic, so the request seed is not sent to the server
 ```console
 GRAPHCAL_BIN=/path/to/graphcal cargo test --features graphcal --test graphcal_workflow -- --ignored
 ```
+
+### Several Graphcal sessions
+
+One `graphcal model serve` session evaluates one request at a time. To use several cores, split a design into chunks and evaluate them on an `EvaluatorPool` of sessions. Each session takes the next chunk as soon as it is free, and the pool yields one item per chunk in completion order, so each result can be stored as soon as it arrives. Sorting the table by evaluation ID restores the design's row order:
+
+```rust
+use std::num::NonZeroUsize;
+
+use tenax::{EvaluationTable, Evaluator, EvaluatorPool, GraphcalEvaluator, sample_latin_hypercube};
+
+let pool = EvaluatorPool::new(
+    (0..8)
+        .map(|_| Ok(GraphcalEvaluator::new(model.session().vary(&load).output(&failure).spawn()?)))
+        .collect::<Result<Vec<_>, tenax::graphcal_model_client::ClientError>>()?,
+)?;
+let schema = pool.schema().clone();
+let design = sample_latin_hypercube(&schema, 10_000, 42, 0)?;
+let chunks = design.split(NonZeroUsize::new(100).expect("non-zero"))?;
+let mut table = EvaluationTable::new(schema.clone());
+for result in pool.evaluate(chunks.clone()) {
+    let result = result?;
+    let chunk = chunks.iter().find(|chunk| chunk.id() == result.id()).expect("a chunk");
+    table.push(chunk.clone(), result)?;
+}
+table.sort_by_id();
+for evaluator in pool.into_evaluators() {
+    evaluator.shutdown()?;
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A split occupies consecutive request sequences of the run, one per chunk. Chunks receive derived model seeds, which Graphcal ignores. An evaluator that fails as a whole stops: its chunk yields an error, and the other evaluators take the remaining chunks.
 
 ### Storing and reusing evaluations
 

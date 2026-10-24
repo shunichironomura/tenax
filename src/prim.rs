@@ -218,6 +218,16 @@ impl BoxLimits {
         &self.limits
     }
 
+    /// Returns these limits with the restriction at `position` taken from
+    /// `other`, which spans the same features.
+    pub(crate) fn with_restriction_of(&self, other: &Self, position: usize) -> Self {
+        let mut limits = self.clone();
+        limits.limits[position]
+            .restriction
+            .clone_from(&other.limits[position].restriction);
+        limits
+    }
+
     /// Looks up a restriction by feature name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Restriction> {
@@ -241,6 +251,27 @@ pub struct BoxStatistics {
 }
 
 impl BoxStatistics {
+    /// Measures the box holding `indices` of `dataset`, relative to every row
+    /// and every case of interest of `dataset`.
+    pub(crate) fn of_rows(
+        dataset: &Dataset,
+        indices: &[usize],
+        restricted_dimensions: usize,
+    ) -> Self {
+        let cases = count_cases(dataset, indices);
+        let points = indices.len();
+        let total_cases = dataset.case_count().max(1);
+        Self {
+            coverage: count_as_f64(cases) / count_as_f64(total_cases),
+            density: count_as_f64(cases) / count_as_f64(points),
+            mean: count_as_f64(cases) / count_as_f64(points),
+            mass: count_as_f64(points) / count_as_f64(dataset.row_count()),
+            restricted_dimensions,
+            points,
+            cases_of_interest: cases,
+        }
+    }
+
     /// Fraction of all cases of interest captured by the box.
     #[must_use]
     pub const fn coverage(&self) -> f64 {
@@ -841,18 +872,11 @@ impl<'data> Prim<'data> {
     }
 
     fn make_step(&self, limits: BoxLimits, indices: Vec<usize>, phase: PrimPhase) -> BoxStep {
-        let cases = count_cases(self.dataset, &indices);
-        let points = indices.len();
-        let total_cases = self.dataset.case_count().max(1);
-        let statistics = BoxStatistics {
-            coverage: count_as_f64(cases) / count_as_f64(total_cases),
-            density: count_as_f64(cases) / count_as_f64(points),
-            mean: count_as_f64(cases) / count_as_f64(points),
-            mass: self.mass_of(&indices),
-            restricted_dimensions: restricted_count(&limits, &self.initial_limits),
-            points,
-            cases_of_interest: cases,
-        };
+        let statistics = BoxStatistics::of_rows(
+            self.dataset,
+            &indices,
+            restricted_count(&limits, &self.initial_limits),
+        );
         let quasi_p_values = self.calculate_quasi_p_values(&limits, &statistics);
         BoxStep {
             limits,
@@ -1060,7 +1084,7 @@ fn make_initial_limits(dataset: &Dataset) -> BoxLimits {
     BoxLimits { limits }
 }
 
-fn rows_in_box(dataset: &Dataset, population: &[usize], limits: &BoxLimits) -> Vec<usize> {
+pub fn rows_in_box(dataset: &Dataset, population: &[usize], limits: &BoxLimits) -> Vec<usize> {
     population
         .iter()
         .copied()
@@ -1088,7 +1112,7 @@ fn rows_in_box(dataset: &Dataset, population: &[usize], limits: &BoxLimits) -> V
         .collect()
 }
 
-fn restricted_count(limits: &BoxLimits, initial: &BoxLimits) -> usize {
+pub fn restricted_count(limits: &BoxLimits, initial: &BoxLimits) -> usize {
     limits
         .limits
         .iter()

@@ -251,7 +251,7 @@ impl ModelPanic {
         }
     }
 
-    fn from_payload(payload: Box<dyn Any + Send>) -> Self {
+    pub(crate) fn from_payload(payload: Box<dyn Any + Send>) -> Self {
         match payload.downcast::<String>() {
             Ok(message) => Self::Message(*message),
             Err(payload) => payload
