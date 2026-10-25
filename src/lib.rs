@@ -22,7 +22,8 @@
 //!
 //! Completed evaluations are kept, with every input, output, and row outcome,
 //! in an [`EvaluationTable`], from which PRIM datasets are derived with a
-//! [`CaseRule`] or a closure. The optional `arrow` feature stores tables as
+//! [`CaseRule`], a [`CaseCondition`] over values inside structured outputs
+//! (selected by an [`OutputPath`]), or a closure. The optional `arrow` feature stores tables as
 //! self-describing Arrow IPC streams (`EvaluationWriter` and
 //! `EvaluationReader`), so one evaluation can feed later analyses without
 //! re-evaluating the model.
@@ -90,6 +91,7 @@
 //! ```
 
 mod candidate_selection;
+mod case_condition;
 mod case_rule;
 mod data;
 mod error;
@@ -105,12 +107,15 @@ mod evaluator_pool;
 mod graphcal;
 mod input;
 mod model_schema;
+mod output_path;
 mod parallel;
 mod prim;
 mod request_split;
 mod restriction_effects;
 mod sampling;
 mod seed;
+#[cfg(test)]
+mod structured_fixture;
 
 #[cfg(feature = "arrow")]
 pub use arrow_array;
@@ -125,6 +130,7 @@ pub use graphcal_model_protocol;
 pub use candidate_selection::{
     CandidateSelection, CandidateSelectionError, MinimumDensity, SelectionObjective,
 };
+pub use case_condition::{AbsentValue, CaseCondition, CaseConditionError};
 pub use case_rule::{CaseRule, Comparison};
 pub use data::{CategoricalView, Dataset, Feature, FeatureKind, FeatureView};
 pub use error::{DataError, PrimError};
@@ -137,7 +143,7 @@ pub use evaluation_arrow::{
     EVALUATION_FORMAT_VERSION, EvaluationDecodeError, TENAX_METADATA_KEY, decode_evaluation_schema,
     evaluation_schema,
 };
-pub use evaluation_dataset::EvaluationDatasetError;
+pub use evaluation_dataset::{EvaluationDatasetError, key_label};
 #[cfg(feature = "arrow")]
 pub use evaluation_ipc::{
     EvaluationReadError, EvaluationReader, EvaluationWriteError, EvaluationWriter, RecoveredTable,
@@ -148,6 +154,7 @@ pub use evaluator_pool::{EvaluatorPool, EvaluatorPoolError, PoolEvaluationError}
 pub use graphcal::GraphcalEvaluator;
 pub use input::{InputAccessError, InputRow, ValueKind};
 pub use model_schema::{ModelSchemaBuilder, ModelSchemaError};
+pub use output_path::{OutputPath, OutputPathError};
 pub use parallel::{ChunkingPolicy, ChunkingPolicyError, ParallelInProcessEvaluator};
 pub use prim::{
     BoxLimits, BoxStatistics, BoxStep, CategorySet, ContinuousRange, FeatureLimit, IntegerRange,

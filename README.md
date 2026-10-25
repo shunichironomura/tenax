@@ -22,6 +22,7 @@ Tenax currently provides a complete path from a Graphcal model or an in-process 
 - Splitting of one request into consecutive row chunks with stable identifiers, and an `EvaluatorPool` that evaluates the chunks on several evaluators of one session schema at once, such as several Graphcal sessions, streaming results in completion order.
 - An `EvaluationTable` that keeps every input, every output, and every row outcome (failed rows included) of any number of evaluations of one session.
 - Explicit conversion of an evaluation table into a static PRIM dataset, classifying cases of interest from a Boolean output, a threshold on a quantity, datetime, or integer output, key membership, or a closure; failed rows are rejected rather than silently dropped.
+- Type-checked paths into record, union, and indexed outputs (`OutputPath`), and case conditions that apply rules at such paths and combine them by conjunction, disjunction, and negation (`CaseCondition`), with an explicit decision for rows whose value uses another union variant than the path names.
 - Self-describing storage of evaluation tables as Arrow IPC streams (optional `arrow` feature), readable back into Tenax without the model and directly by pyarrow and polars.
 
 Tenax also implements conventional Patient Rule Induction Method (PRIM) analysis for static binary input/output datasets:
@@ -219,6 +220,37 @@ let dataset = table.dataset_where(
 ```
 
 The stream's schema extends a Graphcal session record: `evaluation_id` (16 bytes, big-endian), `row`, and `seed` columns; an `inputs` struct and an `outputs` struct whose fields carry their Graphcal wire types, domains, and unit scales as `graphcal` metadata; and an `outcome` struct with the row's outcome `kind` (`success`, `assertion_failed`, `panic`, and so on), `subject`, `message`, and output counts. Outputs are null in failed rows. `EvaluationReader` restores the session from the schema itself. `read_table` rejects a stream that stops inside a message, while `recover_table` returns the evaluations read before it. The format cannot tell a finished stream from one that stopped between messages. Python reads the same file with `pyarrow.ipc.open_stream` or `polars.read_ipc_stream`.
+
+### Classifying values inside structured outputs
+
+A Graphcal model often returns one record whose fields hold the results, some of them unions such as "available with a value" or "not evaluated". An `OutputPath` selects a value inside such an output, checked against its wire type: a record field by name, a union variant and then one of its fields, or an indexed entry by key. A `CaseCondition` applies a `CaseRule` at a path and combines conditions with `all`, `any`, and `not`. A row whose value uses another variant than the path names has no value there, and the condition states what that means:
+
+```rust
+use tenax::graphcal_model_protocol::FiniteF64;
+use tenax::{AbsentValue, CaseCondition, CaseRule, Comparison, OutputPath};
+
+let fast = CaseCondition::at(
+    OutputPath::parse(table.schema(), "result.latency.Available.p90")?,
+    CaseRule::Quantity {
+        comparison: Comparison::AtMost,
+        threshold: FiniteF64::new(12.0 * 3600.0)?,
+    },
+    // A row whose latency was not evaluated is not fast.
+    AbsentValue::NotACase,
+)?;
+let affordable = CaseCondition::at(
+    OutputPath::parse(table.schema(), "result.cost")?,
+    CaseRule::Quantity {
+        comparison: Comparison::Below,
+        threshold: FiniteF64::new(100.0)?,
+    },
+    AbsentValue::Reject,
+)?;
+let dataset = table.dataset_matching(&CaseCondition::all(vec![fast, affordable])?)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`OutputPath::get` reads the selected value of one row, for summaries other than PRIM. `CaseCondition::classify` classifies one row, so a caller can apply its own policy for failed rows, which `cases_matching` rejects.
 
 ### Sampling
 
