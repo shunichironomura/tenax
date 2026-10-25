@@ -203,13 +203,25 @@ impl EvaluationTable {
         Ok(())
     }
 
+    /// Reorders the evaluations by identifier.
+    ///
+    /// Evaluators may complete requests out of order, so a table filled in
+    /// completion order, or read back from a stream written in that order,
+    /// depends on timing. Identifiers are unique within a table, so sorting
+    /// restores one deterministic order; for the chunks of one
+    /// [`EvalRequest::split`] that is the original row order.
+    pub fn sort_by_id(&mut self) {
+        self.evaluations.sort_unstable_by_key(EvaluatedRequest::id);
+    }
+
     /// Returns the session schema of every evaluation.
     #[must_use]
     pub const fn schema(&self) -> &Arc<SessionSchema> {
         &self.schema
     }
 
-    /// Returns the evaluations in the order they were added.
+    /// Returns the evaluations in table order: the order they were added,
+    /// unless the table has been sorted.
     #[must_use]
     pub fn evaluations(&self) -> &[EvaluatedRequest] {
         &self.evaluations
@@ -368,5 +380,28 @@ mod tests {
             ),
             Err(EvaluationTableError::InvalidOutputRow { row: 0, .. })
         ));
+    }
+
+    #[test]
+    fn sorting_orders_evaluations_by_id() {
+        let schema = schema();
+        let mut table = EvaluationTable::new(Arc::clone(&schema));
+        for id in [3, 1, 2] {
+            table
+                .push(
+                    request(&schema, id, &[0.1]),
+                    ChunkResult::new(EvaluationId::new(id), vec![success(&schema, true)]).unwrap(),
+                )
+                .unwrap();
+        }
+        table.sort_by_id();
+        assert_eq!(
+            table
+                .evaluations()
+                .iter()
+                .map(|evaluation| evaluation.id().get())
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
     }
 }

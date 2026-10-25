@@ -4,10 +4,14 @@
 //! The current release implements conventional Patient Rule Induction Method
 //! (PRIM) analysis for static binary input/output datasets, plus reproducible
 //! uniform and Latin-hypercube samplers, a transport-independent evaluator
-//! interface, and sequential and Rayon-parallel in-process workflows. PRIM
-//! supports continuous, integer, and categorical inputs and returns the
-//! complete peeling and pasting trajectory with coverage, density, mass, and
-//! quasi-p diagnostics.
+//! interface, sequential and Rayon-parallel in-process workflows, and an
+//! [`EvaluatorPool`] that spreads the chunks of a split request over several
+//! evaluators, such as several Graphcal sessions. PRIM supports continuous,
+//! integer, and categorical inputs and returns the complete peeling and
+//! pasting trajectory with coverage, density, mass, and quasi-p diagnostics.
+//! A [`CandidateSelection`] chooses one candidate from a trajectory, and
+//! [`PrimBox::restriction_effects`] measures what each of its restrictions
+//! contributes.
 //!
 //! Model schemas, requests, values, and per-row failures use the vocabulary of
 //! the Graphcal batch model-evaluation protocol, re-exported as
@@ -85,6 +89,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod candidate_selection;
 mod case_rule;
 mod data;
 mod error;
@@ -95,12 +100,15 @@ mod evaluation_dataset;
 #[cfg(feature = "arrow")]
 mod evaluation_ipc;
 mod evaluation_table;
+mod evaluator_pool;
 #[cfg(feature = "graphcal")]
 mod graphcal;
 mod input;
 mod model_schema;
 mod parallel;
 mod prim;
+mod request_split;
+mod restriction_effects;
 mod sampling;
 mod seed;
 
@@ -114,6 +122,9 @@ pub use arrow_schema;
 pub use graphcal_model_client;
 pub use graphcal_model_protocol;
 
+pub use candidate_selection::{
+    CandidateSelection, CandidateSelectionError, MinimumDensity, SelectionObjective,
+};
 pub use case_rule::{CaseRule, Comparison};
 pub use data::{CategoricalView, Dataset, Feature, FeatureKind, FeatureView};
 pub use error::{DataError, PrimError};
@@ -132,6 +143,7 @@ pub use evaluation_ipc::{
     EvaluationReadError, EvaluationReader, EvaluationWriteError, EvaluationWriter, RecoveredTable,
 };
 pub use evaluation_table::{EvaluatedRequest, EvaluationTable, EvaluationTableError};
+pub use evaluator_pool::{EvaluatorPool, EvaluatorPoolError, PoolEvaluationError};
 #[cfg(feature = "graphcal")]
 pub use graphcal::GraphcalEvaluator;
 pub use input::{InputAccessError, InputRow, ValueKind};
@@ -141,4 +153,6 @@ pub use prim::{
     BoxLimits, BoxStatistics, BoxStep, CategorySet, ContinuousRange, FeatureLimit, IntegerRange,
     Objective, Prim, PrimBox, PrimConfig, PrimPhase, QuasiPValue, Restriction,
 };
+pub use request_split::RequestSplitError;
+pub use restriction_effects::{RestrictionEffect, RestrictionEffectError};
 pub use sampling::{SamplingError, sample_latin_hypercube, sample_uniform};
