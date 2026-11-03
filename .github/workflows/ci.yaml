@@ -134,7 +134,7 @@ jobs:
       - name: Run actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@v0.8.0
+        uses: zizmorcore/zizmor-action@v0.8.1
         with:
           # Fail on findings without requiring SARIF upload permissions.
           advanced-security: false
