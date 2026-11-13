@@ -21,11 +21,6 @@ const MODEL: &str = "pub index Mode = { Stable, Fragile };\n\
     param mode: Key<Mode>;\n\
     pub node failure: Bool = @load > 7.0 m && @mode == Mode#Fragile;\n";
 
-#[expect(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "a test helper fails its test on setup errors"
-)]
 fn describe(name: &str) -> Model {
     let graphcal_bin = std::env::var_os("GRAPHCAL_BIN")
         .map(PathBuf::from)
@@ -42,10 +37,6 @@ fn describe(name: &str) -> Model {
     .unwrap()
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper fails its test on setup errors"
-)]
 fn spawn(model: &Model) -> GraphcalEvaluator {
     let load = model.input::<Quantity>("load").unwrap();
     let mode = model.input::<Key>("mode").unwrap();
