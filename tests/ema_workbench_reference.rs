@@ -1,11 +1,6 @@
 //! Pins tenax's PRIM trajectories to EMA Workbench 3.0.0.
 //!
 //! The fixture is regenerated with `scripts/generate_ema_reference.py`.
-#![expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "the whole crate is test code, but `allow-unwrap-in-tests` only covers `#[test]` functions"
-)]
 
 use std::collections::BTreeSet;
 
