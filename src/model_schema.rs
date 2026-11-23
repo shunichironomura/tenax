@@ -10,10 +10,10 @@
 use std::sync::Arc;
 
 use graphcal_model_protocol::{
-    Axis, AxisError, AxisKind, Bounds, BoundsError, CanonicalUnitsOnly, DatetimeType, Dimension,
-    Domain, FiniteF64, IndexName, InterfaceError, KeyType, LabelError, ModelInterface,
-    NonFiniteError, OutputDescription, ParameterDescription, PortName, PortWire, QuantityType,
-    SessionError, SessionSchema, SessionSpec, VariantName, WireType,
+    Axis, AxisError, AxisKind, Bounds, BoundsError, CanonicalUnitsOnly, DatetimeType, DeclaredName,
+    Dimension, Domain, FiniteF64, IndexName, InterfaceError, KeyType, LabelError, ModelInterface,
+    NonFiniteError, OutputDescription, PackageName, ParameterDescription, PortName, PortWire,
+    QuantityType, SessionError, SessionSchema, SessionSpec, VariantName, WireType,
 };
 use thiserror::Error;
 
@@ -340,12 +340,16 @@ fn key_type<V>(
 where
     V: Into<String>,
 {
-    let index = IndexName::new(index_name)?;
+    let index = DeclaredName::new(
+        PackageName::new(BUILDER_PACKAGE)?,
+        Vec::new(),
+        IndexName::new(index_name)?,
+    );
     let variants = variants
         .into_iter()
         .map(VariantName::new)
         .collect::<Result<Vec<_>, _>>()?;
-    Axis::new(index, AxisKind::Named { variants })
+    Axis::new(AxisKind::Named { index, variants })
         .map(KeyType::new)
         .map_err(|source| ModelSchemaError::InvalidKey {
             name: name.clone(),
@@ -374,6 +378,19 @@ fn output(name: PortName, wire: WireType) -> OutputDescription {
     OutputDescription::new(name, type_spelling, PortWire::Supported(wire))
 }
 
+/// Package of the indexes that [`ModelSchemaBuilder`] declares. A
+/// protocol v3 index is identified by its declaring package and module; a
+/// schema built in Rust has neither, so its indexes are declared in the
+/// root module of this package.
+pub const BUILDER_PACKAGE: &str = "tenax";
+
+/// The spelling of an axis: its declared index, or `Fin(size)` for a
+/// structural axis, which declares none.
+pub fn axis_spelling(axis: &Axis) -> String {
+    axis.index()
+        .map_or_else(|| format!("Fin({})", axis.len()), ToString::to_string)
+}
+
 /// Renders a human-readable type spelling for the interface description.
 fn type_spelling(wire: &WireType) -> String {
     match wire {
@@ -388,7 +405,7 @@ fn type_spelling(wire: &WireType) -> String {
             .join(" * "),
         WireType::Int => "Int".to_owned(),
         WireType::Bool => "Bool".to_owned(),
-        WireType::Key(key) => format!("Key<{}>", key.axis().index()),
+        WireType::Key(key) => format!("Key<{}>", axis_spelling(key.axis())),
         WireType::Complex(quantity) => format!(
             "Complex<{}>",
             type_spelling(&WireType::Quantity(quantity.clone()))
@@ -397,7 +414,7 @@ fn type_spelling(wire: &WireType) -> String {
         WireType::Indexed(indexed) => format!(
             "{}[{}]",
             type_spelling(indexed.element()),
-            indexed.axis().index()
+            axis_spelling(indexed.axis())
         ),
         WireType::Algebraic(algebraic) => algebraic.name().to_string(),
     }
@@ -405,9 +422,10 @@ fn type_spelling(wire: &WireType) -> String {
 
 #[cfg(test)]
 mod tests {
-    use graphcal_model_protocol::{BaseDimensionName, Exponent, UnitSpelling};
+    use graphcal_model_protocol::UnitSpelling;
 
     use super::*;
+    use crate::structured_fixture::{base_dimension, declared_index};
 
     #[test]
     fn builds_a_session_varying_every_input_in_declaration_order() {
@@ -448,7 +466,8 @@ mod tests {
         };
         assert!(matches!(
             mode.axis().kind(),
-            AxisKind::Named { variants } if variants[0].as_str() == "safe"
+            AxisKind::Named { index, variants }
+                if index == &declared_index("Mode") && variants[0].as_str() == "safe"
         ));
         assert_eq!(schema.inputs()[3].domain(), None);
         assert_eq!(schema.outputs()[1].wire(), &WireType::Int);
@@ -457,10 +476,7 @@ mod tests {
     #[test]
     fn quantity_inputs_carry_their_dimension_and_unit() {
         let length = QuantityType::new(
-            Dimension::from_iter([(
-                BaseDimensionName::new("Length").unwrap(),
-                Exponent::new(1, 1).unwrap(),
-            )]),
+            base_dimension("Length"),
             Some(UnitSpelling::new("m").unwrap()),
         )
         .unwrap();
@@ -507,7 +523,7 @@ mod tests {
         assert!(matches!(
             ModelSchemaBuilder::new().categorical("mode", "Mode", Vec::<String>::new()),
             Err(ModelSchemaError::InvalidKey {
-                source: AxisError::Empty { .. },
+                source: AxisError::Empty,
                 ..
             })
         ));
