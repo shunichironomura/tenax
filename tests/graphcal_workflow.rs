@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use tenax::graphcal_model_client::{Bool, GraphcalCommand, Key, Model, Quantity};
 use tenax::{
     CandidateSelection, EvaluationTable, Evaluator, EvaluatorPool, GraphcalEvaluator,
-    MinimumDensity, Objective, Prim, PrimConfig, Restriction, RowOutcome, SelectionObjective,
-    sample_latin_hypercube,
+    MinimumDensity, Objective, Prim, PrimConfig, Restriction, RowOutcome, SampledKind,
+    SelectionObjective, sample_latin_hypercube, sampled_parameters, vary_sampled_parameters,
 };
 
 const MODEL: &str = "pub index Mode = { Stable, Fragile };\n\
@@ -151,6 +151,46 @@ fn pooled_sessions_evaluate_a_split_design_like_one_session() {
         ["load", "mode"]
     );
     assert!(effects.iter().all(|effect| effect.density_gain() > 0.2));
+}
+
+#[test]
+#[ignore = "requires GRAPHCAL_BIN"]
+fn sampling_every_parameter_matches_the_typed_session() {
+    let model = describe("graphcal_sampled_parameters");
+    let parameters = sampled_parameters(model.interface()).unwrap();
+    assert_eq!(
+        parameters
+            .iter()
+            .map(|parameter| (parameter.name().as_str(), parameter.kind()))
+            .collect::<Vec<_>>(),
+        [("load", SampledKind::Quantity), ("mode", SampledKind::Key)]
+    );
+    let sampled = GraphcalEvaluator::new(
+        vary_sampled_parameters(&model, model.session(), &parameters)
+            .unwrap()
+            .output_all_supported()
+            .spawn()
+            .unwrap(),
+    );
+    let typed = spawn(&model);
+    assert_eq!(sampled.schema(), typed.schema());
+
+    let design = sample_latin_hypercube(typed.schema(), 200, 0x5eed, 0).unwrap();
+    let evaluate = |evaluator: &GraphcalEvaluator| {
+        let result = evaluator
+            .evaluate(vec![design.clone()])
+            .next()
+            .unwrap()
+            .unwrap();
+        let mut table = EvaluationTable::new(evaluator.schema().clone());
+        table.push(design.clone(), result).unwrap();
+        table
+    };
+    let comparison = evaluate(&typed).compare(&evaluate(&sampled)).unwrap();
+    assert_eq!(comparison.rows(), 200);
+    assert!(comparison.is_identical());
+    sampled.shutdown().unwrap();
+    typed.shutdown().unwrap();
 }
 
 /// Stores a Graphcal session's evaluations and restores them, session

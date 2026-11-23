@@ -19,8 +19,10 @@ Tenax currently provides a complete path from a Graphcal model or an in-process 
 - Per-row success or failure data: failed assertions, out-of-domain inputs, and evaluation errors reported by the model, plus caught unwinding panics and invalid outputs.
 - Sequential and Rayon-parallel in-process closure evaluators, with an explicit fixed-row work-chunk policy and completion-order result streaming.
 - A `GraphcalEvaluator` (optional `graphcal` feature) that drives a Graphcal model through a persistent `graphcal model serve` session.
+- Selection of every parameter of a model interface for sampling (`sampled_parameters`), reporting all parameters the samplers cannot draw at once, and `vary_sampled_parameters` (optional `graphcal` feature) to vary them through Graphcal's typed handles.
 - Splitting of one request into consecutive row chunks with stable identifiers, and an `EvaluatorPool` that evaluates the chunks on several evaluators of one session schema at once, such as several Graphcal sessions, streaming results in completion order.
 - An `EvaluationTable` that keeps every input, every output, and every row outcome (failed rows included) of any number of evaluations of one session.
+- Bit-for-bit comparison of two evaluation tables of the same requests (`EvaluationTable::compare`), reporting each differing value by `OutputPath` with its largest relative difference, to check that a reevaluation, for example on another platform, reproduces a reference.
 - Explicit conversion of an evaluation table into a static PRIM dataset, classifying cases of interest from a Boolean output, a threshold on a quantity, datetime, or integer output, key membership, or a closure; failed rows are rejected rather than silently dropped.
 - Type-checked paths into record, union, and indexed outputs (`OutputPath`), and case conditions that apply rules at such paths and combine them by conjunction, disjunction, and negation (`CaseCondition`), with an explicit decision for rows whose value uses another union variant than the path names.
 - Self-describing storage of evaluation tables as Arrow IPC streams (optional `arrow` feature), readable back into Tenax without the model and directly by pyarrow and polars.
@@ -159,6 +161,18 @@ Graphcal models are deterministic, so the request seed is not sent to the server
 GRAPHCAL_BIN=/path/to/graphcal cargo test --features graphcal --test graphcal_workflow -- --ignored
 ```
 
+To vary every parameter of a model rather than choosing them one by one, `sampled_parameters` reads the model's interface and returns each parameter, in declaration order, with how the samplers draw it, or an error listing every parameter they cannot draw (unbounded, complex, indexed, algebraic, or not carried by the batch protocol). Parameters with a default are varied too; select parameters explicitly to keep some at their defaults. `vary_sampled_parameters` then varies them through the typed handle of each kind, so Graphcal still checks every parameter's kind:
+
+```rust
+use tenax::{sampled_parameters, vary_sampled_parameters};
+
+let parameters = sampled_parameters(model.interface())?;
+let session = vary_sampled_parameters(&model, model.session(), &parameters)?
+    .output_all_supported()
+    .spawn()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ### Several Graphcal sessions
 
 One `graphcal model serve` session evaluates one request at a time. To use several cores, split a design into chunks and evaluate them on an `EvaluatorPool` of sessions. Each session takes the next chunk as soon as it is free, and the pool yields one item per chunk in completion order, so each result can be stored as soon as it arrives. Sorting the table by evaluation ID restores the design's row order:
@@ -220,6 +234,18 @@ let dataset = table.dataset_where(
 ```
 
 The stream's schema extends a Graphcal session record: `evaluation_id` (16 bytes, big-endian), `row`, and `seed` columns; an `inputs` struct and an `outputs` struct whose fields carry their Graphcal wire types, domains, and unit scales as `graphcal` metadata; and an `outcome` struct with the row's outcome `kind` (`success`, `assertion_failed`, `panic`, and so on), `subject`, `message`, and output counts. Outputs are null in failed rows. `EvaluationReader` restores the session from the schema itself. `read_table` rejects a stream that stops inside a message, while `recover_table` returns the evaluations read before it. The format cannot tell a finished stream from one that stopped between messages. Python reads the same file with `pyarrow.ipc.open_stream` or `polars.read_ipc_stream`.
+
+`EvaluationTable::compare` checks a new evaluation of the same requests against a stored one, pairing evaluations by identifier. It counts the rows that are bit-for-bit identical, the rows whose outcome changes (success against failure, or another failure), and, for each differing value, its `OutputPath`, the number of rows in which it differs, and its `Deviation`: the largest relative difference of a quantity or complex value, or `Unequal` for values without a numeric distance.
+
+```rust
+let reference = EvaluationReader::try_new(File::open("evaluations.arrows")?)?.read_table()?;
+let comparison = reference.compare(&table)?;
+println!("{} of {} rows identical", comparison.identical_rows(), comparison.rows());
+for difference in comparison.differences() {
+    println!("{}: {} rows, {:?}", difference.path(), difference.rows(), difference.deviation());
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ### Classifying values inside structured outputs
 

@@ -5,7 +5,7 @@ use std::fmt;
 
 use graphcal_model_protocol::{
     AlgebraicType, ConstructorPosition, ConstructorType, KeyRef, OutputSlot, PortName,
-    SessionSchema, Value, WireType,
+    SessionOutput, SessionSchema, Value, WireType,
 };
 use thiserror::Error;
 
@@ -74,8 +74,8 @@ pub enum OutputPathError {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum Step {
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Step {
     /// The field at this position of the current constructor.
     Field(usize),
     /// The current union value must use this constructor.
@@ -150,6 +150,26 @@ impl OutputPath {
             labels: Vec::new(),
             cursor: Cursor::Value(output.wire().clone()),
         })
+    }
+
+    /// Assembles a path that a traversal of `output`'s values has already
+    /// checked: `steps` lead from the output to a value of type `target`,
+    /// and `labels` spell them.
+    pub(crate) fn from_checked_steps(
+        slot: OutputSlot,
+        output: &SessionOutput,
+        steps: Vec<Step>,
+        labels: Vec<String>,
+        target: WireType,
+    ) -> Self {
+        Self {
+            slot,
+            output: output.name().clone(),
+            output_wire: output.wire().clone(),
+            steps,
+            labels,
+            cursor: Cursor::Value(target),
+        }
     }
 
     /// Parses a dot-separated path: the output name, then one step per
