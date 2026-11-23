@@ -55,7 +55,7 @@ fn algebraic(name: &str, constructors: Vec<ConstructorType>) -> WireType {
     WireType::Algebraic(AlgebraicType::new(TypeName::new(name).unwrap(), constructors).unwrap())
 }
 
-fn named_axis(index: &str, variants: &[&str]) -> Axis {
+pub fn named_axis(index: &str, variants: &[&str]) -> Axis {
     Axis::new(AxisKind::Named {
         index: declared_index(index),
         variants: variants

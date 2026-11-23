@@ -17,7 +17,9 @@
 //! the Graphcal batch model-evaluation protocol, re-exported as
 //! [`graphcal_model_protocol`]. Graphcal is the primary model implementation:
 //! the optional `graphcal` feature adds `GraphcalEvaluator`, which drives a
-//! Graphcal model through the re-exported `graphcal_model_client`. Simple Rust
+//! Graphcal model through the re-exported `graphcal_model_client`;
+//! [`sampled_parameters`] and `vary_sampled_parameters` configure a session
+//! that varies every parameter the samplers can draw. Simple Rust
 //! models are declared with [`ModelSchemaBuilder`] and evaluated in process.
 //!
 //! Completed evaluations are kept, with every input, output, and row outcome,
@@ -27,6 +29,8 @@
 //! self-describing Arrow IPC streams (`EvaluationWriter` and
 //! `EvaluationReader`), so one evaluation can feed later analyses without
 //! re-evaluating the model.
+//! [`EvaluationTable::compare`] checks that two tables of the same requests
+//! agree bit for bit, and reports where and how far they drift if not.
 //!
 //! # Example
 //!
@@ -98,6 +102,7 @@ mod error;
 mod evaluation;
 #[cfg(feature = "arrow")]
 mod evaluation_arrow;
+mod evaluation_comparison;
 mod evaluation_dataset;
 #[cfg(feature = "arrow")]
 mod evaluation_ipc;
@@ -105,6 +110,8 @@ mod evaluation_table;
 mod evaluator_pool;
 #[cfg(feature = "graphcal")]
 mod graphcal;
+#[cfg(feature = "graphcal")]
+mod graphcal_session;
 mod input;
 mod model_schema;
 mod output_path;
@@ -112,6 +119,7 @@ mod parallel;
 mod prim;
 mod request_split;
 mod restriction_effects;
+mod sampled_parameter;
 mod sampling;
 mod seed;
 #[cfg(test)]
@@ -143,6 +151,9 @@ pub use evaluation_arrow::{
     EVALUATION_FORMAT_VERSION, EvaluationDecodeError, TENAX_METADATA_KEY, decode_evaluation_schema,
     evaluation_schema,
 };
+pub use evaluation_comparison::{
+    Deviation, TableComparison, TableComparisonError, ValueDifference,
+};
 pub use evaluation_dataset::{EvaluationDatasetError, key_label};
 #[cfg(feature = "arrow")]
 pub use evaluation_ipc::{
@@ -152,6 +163,8 @@ pub use evaluation_table::{EvaluatedRequest, EvaluationTable, EvaluationTableErr
 pub use evaluator_pool::{EvaluatorPool, EvaluatorPoolError, PoolEvaluationError};
 #[cfg(feature = "graphcal")]
 pub use graphcal::GraphcalEvaluator;
+#[cfg(feature = "graphcal")]
+pub use graphcal_session::vary_sampled_parameters;
 pub use input::{InputAccessError, InputRow, ValueKind};
 pub use model_schema::{ModelSchemaBuilder, ModelSchemaError};
 pub use output_path::{OutputPath, OutputPathError};
@@ -162,4 +175,8 @@ pub use prim::{
 };
 pub use request_split::RequestSplitError;
 pub use restriction_effects::{RestrictionEffect, RestrictionEffectError};
+pub use sampled_parameter::{
+    SampledKind, SampledParameter, SampledParametersError, UnsampleableParameter,
+    UnsampleableReason, UnsampledWire, sampled_parameters,
+};
 pub use sampling::{SamplingError, sample_latin_hypercube, sample_uniform};

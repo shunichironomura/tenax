@@ -2,10 +2,11 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::Arc;
 
 use graphcal_model_protocol::{
     AlgebraicType, ConstructorPosition, ConstructorType, KeyRef, OutputSlot, PortName,
-    SessionSchema, Value, WireType,
+    SessionOutput, SessionSchema, Value, WireType,
 };
 use thiserror::Error;
 
@@ -74,8 +75,8 @@ pub enum OutputPathError {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum Step {
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Step {
     /// The field at this position of the current constructor.
     Field(usize),
     /// The current union value must use this constructor.
@@ -123,7 +124,8 @@ enum Cursor {
 pub struct OutputPath {
     slot: OutputSlot,
     output: PortName,
-    output_wire: WireType,
+    /// Shared by every path a traversal of one output builds.
+    output_wire: Arc<WireType>,
     steps: Vec<Step>,
     labels: Vec<String>,
     cursor: Cursor,
@@ -145,11 +147,33 @@ impl OutputPath {
         Ok(Self {
             slot,
             output: output.name().clone(),
-            output_wire: output.wire().clone(),
+            output_wire: Arc::new(output.wire().clone()),
             steps: Vec::new(),
             labels: Vec::new(),
             cursor: Cursor::Value(output.wire().clone()),
         })
+    }
+
+    /// Assembles a path that a traversal of `output`'s values has already
+    /// checked: `steps` lead from the output to a value of type `target`,
+    /// and `labels` spell them. `output_wire` is `output`'s wire type,
+    /// shared by the paths of one traversal.
+    pub(crate) fn from_checked_steps(
+        slot: OutputSlot,
+        output: &SessionOutput,
+        output_wire: Arc<WireType>,
+        steps: Vec<Step>,
+        labels: Vec<String>,
+        target: WireType,
+    ) -> Self {
+        Self {
+            slot,
+            output: output.name().clone(),
+            output_wire,
+            steps,
+            labels,
+            cursor: Cursor::Value(target),
+        }
     }
 
     /// Parses a dot-separated path: the output name, then one step per
@@ -297,6 +321,13 @@ impl OutputPath {
         Ok(self)
     }
 
+    /// Returns the wire type of the path's output, as shared by the paths
+    /// of one traversal.
+    #[cfg(test)]
+    pub(crate) const fn shared_output_wire(&self) -> &Arc<WireType> {
+        &self.output_wire
+    }
+
     /// Returns the output the path starts at.
     #[must_use]
     pub const fn output(&self) -> OutputSlot {
@@ -318,7 +349,7 @@ impl OutputPath {
     #[must_use]
     pub fn belongs_to(&self, schema: &SessionSchema) -> bool {
         schema.output(self.slot).is_some_and(|output| {
-            output.name() == &self.output && output.wire() == &self.output_wire
+            output.name() == &self.output && output.wire() == &*self.output_wire
         })
     }
 
