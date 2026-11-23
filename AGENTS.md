@@ -8,8 +8,8 @@
   - Reject invalid, ambiguous, missing, or non-finite data at a well-defined boundary rather than allowing it to acquire accidental algorithmic meaning.
   - Make ordering, tie-breaking, randomness, and stopping behavior explicit and deterministic where practical.
   - Validate algorithm behavior against independent implementations, published definitions, and behavioral invariants.
-- Tenax has not been published and its API is not stable. Breaking changes are acceptable when they produce a simpler, safer, or cleaner design.
-  - Do not add compatibility workarounds for an unpublished API. Make the coherent design change and update the repository consistently.
+- Tenax is published on crates.io only as experimental `0.0.x` releases, and its API is not stable. Breaking changes are acceptable when they produce a simpler, safer, or cleaner design.
+  - Do not add compatibility workarounds for this unstable API. Make the coherent design change and update the repository consistently.
 
 ## Documentation
 

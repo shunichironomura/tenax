@@ -2,7 +2,7 @@
 
 > Hold fast under uncertainty.
 
-**Status:** Roadmap steps 1 and 2 are implemented as an experimental Rust library. The API is not yet stable and no release has been published.
+**Status:** Roadmap steps 1 and 2 are implemented as an experimental Rust library. Experimental `0.0.x` releases are published on [crates.io](https://crates.io/crates/tenax), and the API is not yet stable.
 
 Tenax is a Rust-first toolkit for scenario discovery and robust decision-making under deep uncertainty (DMDU). Scenario discovery identifies combinations of uncertain inputs under which a candidate policy succeeds or fails. Tenax aims to support both analysis of existing experiment data and adaptive evaluation of callable simulation models.
 
