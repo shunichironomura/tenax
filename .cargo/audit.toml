@@ -1,0 +1,8 @@
+[advisories]
+ignore = [
+    # chrono is unmaintained (no fixed upgrade available). It reaches Tenax only
+    # through the arrow-select dev-dependency (arrow-select -> arrow-array ->
+    # chrono), so it is not part of the published library's dependency graph.
+    # Remove this entry once Arrow drops or replaces chrono.
+    "RUSTSEC-2026-0543",
+]
