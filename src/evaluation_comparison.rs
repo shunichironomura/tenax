@@ -1,13 +1,15 @@
 //! Comparing two evaluation tables of the same requests output by output.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use graphcal_model_protocol::{
-    Axis, ConstructorType, FieldType, OutputSlot, SessionOutput, Value, WireType,
+    Axis, ComplexValue, ConstructorType, FieldType, FiniteF64, InputColumn, KeyValue, OutputSlot,
+    SessionOutput, Value, WireType,
 };
 use thiserror::Error;
 
-use crate::evaluation::{EvaluationId, OutputRow, RowOutcome};
+use crate::evaluation::{EvalRequest, EvaluationId, OutputRow, RowOutcome};
 use crate::evaluation_dataset::key_label;
 use crate::evaluation_table::{EvaluatedRequest, EvaluationTable};
 use crate::output_path::{OutputPath, Step};
@@ -207,8 +209,9 @@ impl EvaluationTable {
     /// # Errors
     ///
     /// Returns [`TableComparisonError`] when the tables belong to different
-    /// sessions, do not hold the same identifiers, or hold different requests
-    /// under one identifier.
+    /// sessions, do not hold the same identifiers, or hold requests under one
+    /// identifier that differ in seed or in any bit of their inputs (so `0.0`
+    /// and `-0.0` differ, as they do for the model).
     pub fn compare(&self, other: &Self) -> Result<TableComparison, TableComparisonError> {
         if self.schema() != other.schema() {
             return Err(TableComparisonError::SchemaMismatch);
@@ -224,7 +227,10 @@ impl EvaluationTable {
         let outputs = self
             .schema()
             .output_slots()
-            .filter_map(|slot| Some((slot, self.schema().output(slot)?)))
+            .filter_map(|slot| {
+                let output = self.schema().output(slot)?;
+                Some((slot, output, Arc::new(output.wire().clone())))
+            })
             .collect::<Vec<_>>();
         let mut comparison = TableComparison {
             rows: 0,
@@ -235,29 +241,15 @@ impl EvaluationTable {
         let mut differences = BTreeMap::<PathKey, ValueDifference>::new();
         for (id, left) in &expected {
             let right = actual[id];
-            if left.request() != right.request() {
+            if !same_request(left.request(), right.request()) {
                 return Err(TableComparisonError::RequestMismatch { id: *id });
             }
             for (a, b) in left.rows().iter().zip(right.rows()) {
                 comparison.rows += 1;
                 match (a, b) {
                     (RowOutcome::Success(a), RowOutcome::Success(b)) => {
-                        let row = row_differences(&outputs, a, b);
-                        if row.is_empty() {
+                        if record_row(&outputs, a, b, &mut differences) {
                             comparison.identical_rows += 1;
-                        }
-                        for (key, (path, deviation)) in row {
-                            differences
-                                .entry(key)
-                                .and_modify(|difference| {
-                                    difference.rows += 1;
-                                    difference.deviation = difference.deviation.merge(deviation);
-                                })
-                                .or_insert(ValueDifference {
-                                    path,
-                                    rows: 1,
-                                    deviation,
-                                });
                         }
                     }
                     _ if a == b => comparison.identical_rows += 1,
@@ -278,29 +270,98 @@ fn by_id(table: &EvaluationTable) -> BTreeMap<EvaluationId, &EvaluatedRequest> {
         .collect()
 }
 
+/// Whether two requests have the same identifier and seed and bit-identical
+/// inputs, so `-0.0` and `0.0` differ as they do for the model.
+fn same_request(a: &EvalRequest, b: &EvalRequest) -> bool {
+    a.id() == b.id()
+        && a.seed() == b.seed()
+        && a.inputs().rows() == b.inputs().rows()
+        && a.inputs().columns().len() == b.inputs().columns().len()
+        && a.inputs()
+            .columns()
+            .iter()
+            .zip(b.inputs().columns())
+            .all(|(a, b)| same_column(a, b))
+}
+
+fn same_column(a: &InputColumn, b: &InputColumn) -> bool {
+    match (a, b) {
+        (InputColumn::Quantity(xs), InputColumn::Quantity(ys))
+        | (InputColumn::Datetime(xs), InputColumn::Datetime(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| same_float(*x, *y))
+        }
+        (InputColumn::Complex(xs), InputColumn::Complex(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| same_complex(x, y))
+        }
+        (InputColumn::Structured(xs), InputColumn::Structured(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| same_bits(x, y))
+        }
+        _ => a == b,
+    }
+}
+
+/// Whether two values are bit-identical, down to the sign of a zero.
+fn same_bits(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Quantity(x), Value::Quantity(y))
+        | (Value::Datetime(x), Value::Datetime(y))
+        | (Value::Key(KeyValue::Coordinate(x)), Value::Key(KeyValue::Coordinate(y))) => {
+            same_float(*x, *y)
+        }
+        (Value::Complex(x), Value::Complex(y)) => same_complex(x, y),
+        (Value::Indexed(xs), Value::Indexed(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| same_bits(x, y))
+        }
+        (
+            Value::Algebraic {
+                constructor: cx,
+                fields: fx,
+            },
+            Value::Algebraic {
+                constructor: cy,
+                fields: fy,
+            },
+        ) => cx == cy && fx.len() == fy.len() && fx.iter().zip(fy).all(|(x, y)| same_bits(x, y)),
+        _ => a == b,
+    }
+}
+
+const fn same_float(a: FiniteF64, b: FiniteF64) -> bool {
+    a.get().to_bits() == b.get().to_bits()
+}
+
+const fn same_complex(a: &ComplexValue, b: &ComplexValue) -> bool {
+    same_float(a.re, b.re) && same_float(a.im, b.im)
+}
+
 /// Orders paths by output, then by the positions of their steps.
 type PathKey = (OutputSlot, Vec<Step>);
 
-/// The differing values of one row, by path.
-type RowDifferences = BTreeMap<PathKey, (OutputPath, Deviation)>;
-
-fn row_differences(
-    outputs: &[(OutputSlot, &SessionOutput)],
+/// Records every differing value of one row in `differences` and returns
+/// whether the row is identical.
+fn record_row(
+    outputs: &[(OutputSlot, &SessionOutput, Arc<WireType>)],
     a: &OutputRow,
     b: &OutputRow,
-) -> RowDifferences {
-    let mut found = BTreeMap::new();
-    for ((slot, output), (a, b)) in outputs.iter().zip(a.values().iter().zip(b.values())) {
+    differences: &mut BTreeMap<PathKey, ValueDifference>,
+) -> bool {
+    let mut identical = true;
+    for ((slot, output, output_wire), (a, b)) in
+        outputs.iter().zip(a.values().iter().zip(b.values()))
+    {
         let mut trace = Trace {
             slot: *slot,
             output,
+            output_wire,
             steps: Vec::new(),
             labels: Vec::new(),
-            found: &mut found,
+            differences: &mut *differences,
+            identical: true,
         };
         trace.compare(output.wire(), a, b);
+        identical &= trace.identical;
     }
-    found
+    identical
 }
 
 /// What spells one step of a path.
@@ -327,29 +388,27 @@ impl Label<'_> {
 struct Trace<'s, 'f> {
     slot: OutputSlot,
     output: &'s SessionOutput,
+    output_wire: &'s Arc<WireType>,
     steps: Vec<Step>,
     labels: Vec<Label<'s>>,
-    found: &'f mut RowDifferences,
+    differences: &'f mut BTreeMap<PathKey, ValueDifference>,
+    identical: bool,
 }
 
 impl<'s> Trace<'s, '_> {
     fn compare(&mut self, wire: &'s WireType, a: &Value, b: &Value) {
         match (wire, a, b) {
             (_, Value::Quantity(x), Value::Quantity(y)) => {
-                if x.get().to_bits() != y.get().to_bits() {
+                if !same_float(*x, *y) {
                     let deviation = relative_difference((x.get(), 0.0), (y.get(), 0.0));
                     self.record(wire, Deviation::Relative(deviation));
                 }
             }
             (_, Value::Complex(x), Value::Complex(y)) => {
-                let (x, y) = ((x.re.get(), x.im.get()), (y.re.get(), y.im.get()));
-                if x.0.to_bits() != y.0.to_bits() || x.1.to_bits() != y.1.to_bits() {
-                    self.record(wire, Deviation::Relative(relative_difference(x, y)));
-                }
-            }
-            (_, Value::Datetime(x), Value::Datetime(y)) => {
-                if x.get().to_bits() != y.get().to_bits() {
-                    self.record(wire, Deviation::Unequal);
+                if !same_complex(x, y) {
+                    let deviation =
+                        relative_difference((x.re.get(), x.im.get()), (y.re.get(), y.im.get()));
+                    self.record(wire, Deviation::Relative(deviation));
                 }
             }
             (WireType::Indexed(indexed), Value::Indexed(xs), Value::Indexed(ys))
@@ -401,48 +460,74 @@ impl<'s> Trace<'s, '_> {
                     self.labels.pop();
                 }
             }
-            _ if a == b => {}
+            // Datetimes, coordinate keys, and everything without a numeric
+            // distance.
+            _ if same_bits(a, b) => {}
             _ => self.record(wire, Deviation::Unequal),
         }
     }
 
+    /// Counts the row at the current path. Each step names a distinct
+    /// position, so a row reaches a path once.
     fn record(&mut self, wire: &WireType, deviation: Deviation) {
+        self.identical = false;
         let key = (self.slot, self.steps.clone());
+        if let Some(difference) = self.differences.get_mut(&key) {
+            difference.rows += 1;
+            difference.deviation = difference.deviation.merge(deviation);
+            return;
+        }
         let path = OutputPath::from_checked_steps(
             self.slot,
             self.output,
+            Arc::clone(self.output_wire),
             self.steps.clone(),
             self.labels.iter().map(Label::spell).collect(),
             wire.clone(),
         );
-        // Each step names a distinct position, so a row reaches a path once.
-        self.found.insert(key, (path, deviation));
+        self.differences.insert(
+            key,
+            ValueDifference {
+                path,
+                rows: 1,
+                deviation,
+            },
+        );
     }
 }
 
 /// `|a - b| / max(|a|, |b|)` of two complex numbers, zero when both are
-/// zero.
+/// zero, in `[0, 2]`.
 ///
-/// Both are scaled by their largest component first, so the result is finite
-/// (at most 2) even where `a - b` would overflow.
+/// The difference is taken before scaling, so adjacent floats keep their
+/// gap. Only where a difference or magnitude would overflow are both
+/// numbers first scaled by their largest component. Rounding can push a
+/// nearly opposite pair just past 2, the bound the triangle inequality
+/// gives, so the result is clamped to it.
 fn relative_difference(a: (f64, f64), b: (f64, f64)) -> f64 {
-    let scale = [a.0, a.1, b.0, b.1]
-        .into_iter()
-        .map(f64::abs)
-        .fold(0.0, f64::max);
-    if scale == 0.0 {
-        return 0.0;
-    }
-    let (a, b) = ((a.0 / scale, a.1 / scale), (b.0 / scale, b.1 / scale));
+    let direct = (a.0 - b.0).hypot(a.1 - b.1);
     let magnitude = a.0.hypot(a.1).max(b.0.hypot(b.1));
-    (a.0 - b.0).hypot(a.1 - b.1) / magnitude
+    let relative = if direct.is_finite() && magnitude.is_finite() {
+        if magnitude == 0.0 {
+            return 0.0;
+        }
+        direct / magnitude
+    } else {
+        let scale = [a.0, a.1, b.0, b.1]
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0, f64::max);
+        let (a, b) = ((a.0 / scale, a.1 / scale), (b.0 / scale, b.1 / scale));
+        (a.0 - b.0).hypot(a.1 - b.1) / a.0.hypot(a.1).max(b.0.hypot(b.1))
+    };
+    relative.min(2.0)
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use graphcal_model_protocol::{FiniteF64, InputColumn, RequestBatch, SessionSchema};
+    use graphcal_model_protocol::{RequestBatch, SessionSchema};
 
     use super::*;
     use crate::evaluation::{ChunkResult, EvalRequest, RowFailure, SessionMismatch};
@@ -662,6 +747,103 @@ mod tests {
             left.compare(&other_session),
             Err(TableComparisonError::SchemaMismatch)
         );
+    }
+
+    #[test]
+    fn requests_must_match_bit_for_bit() {
+        let schema = report_session();
+        let zero = |x: f64| {
+            let inputs = RequestBatch::new(
+                Arc::clone(&schema),
+                vec![InputColumn::Quantity(vec![FiniteF64::new(x).unwrap()])],
+            )
+            .unwrap();
+            let mut table = EvaluationTable::new(Arc::clone(&schema));
+            table
+                .push(
+                    EvalRequest::new(EvaluationId::new(1), 7, inputs),
+                    ChunkResult::new(EvaluationId::new(1), vec![baseline()]).unwrap(),
+                )
+                .unwrap();
+            table
+        };
+        // The protocol's equality treats the zeros as equal; the model
+        // receives different inputs.
+        assert_eq!(
+            zero(0.0).compare(&zero(-0.0)),
+            Err(TableComparisonError::RequestMismatch {
+                id: EvaluationId::new(1)
+            })
+        );
+        assert!(zero(-0.0).compare(&zero(-0.0)).unwrap().is_identical());
+    }
+
+    #[test]
+    fn coordinate_keys_and_nested_values_compare_by_bits() {
+        let coordinate = |x: f64| Value::Key(KeyValue::Coordinate(FiniteF64::new(x).unwrap()));
+        assert!(same_bits(&coordinate(0.0), &coordinate(0.0)));
+        assert!(!same_bits(&coordinate(0.0), &coordinate(-0.0)));
+        let nested = |x: f64| Value::Indexed(vec![Value::Bool(true), coordinate(x)]);
+        assert!(!same_bits(&nested(0.0), &nested(-0.0)));
+        assert!(!same_bits(&Value::Bool(true), &coordinate(0.0)));
+
+        // A differing coordinate key is reported as unequal.
+        let mut differences = BTreeMap::new();
+        let schema = report_session();
+        let output = &schema.outputs()[0];
+        let wire = Arc::new(output.wire().clone());
+        let mut trace = Trace {
+            slot: schema.output_slots().next().unwrap(),
+            output,
+            output_wire: &wire,
+            steps: Vec::new(),
+            labels: Vec::new(),
+            differences: &mut differences,
+            identical: true,
+        };
+        trace.compare(&WireType::Bool, &coordinate(0.0), &coordinate(-0.0));
+        assert!(!trace.identical);
+        assert_eq!(
+            differences.into_values().next().unwrap().deviation(),
+            Deviation::Unequal
+        );
+    }
+
+    #[test]
+    fn paths_of_one_output_share_its_wire_type() {
+        let left = table(vec![(1, vec![baseline(), baseline()])]);
+        let right = table(vec![(
+            1,
+            vec![
+                success(11.0, Some(2.0), [false, false], "Good"),
+                success(12.0, Some(2.0), [false, true], "Good"),
+            ],
+        )]);
+        let comparison = left.compare(&right).unwrap();
+        let [cost, first, second] = comparison.differences() else {
+            panic!("cost and both checks differ");
+        };
+        assert_eq!((cost.rows(), first.rows(), second.rows()), (2, 2, 1));
+        assert!(Arc::ptr_eq(
+            cost.path().shared_output_wire(),
+            second.path().shared_output_wire()
+        ));
+    }
+
+    #[test]
+    fn relative_differences_keep_adjacent_gaps_and_their_bound() {
+        // Scaling by 3 first would round the imaginary parts together.
+        let next = 1.75_f64.next_up();
+        let relative = relative_difference((3.0, 1.75), (3.0, next));
+        assert!(relative > 0.0);
+        let expected = (next - 1.75) / 3.0_f64.hypot(next);
+        assert!(
+            (relative - expected).abs() <= f64::EPSILON * expected,
+            "{relative}"
+        );
+        // Nearly opposite numbers round just past 2 without the clamp.
+        let u = 1.0_f64.next_down();
+        assert_eq!(relative_difference((1.0, u), (-u, -1.0)), 2.0);
     }
 
     #[test]

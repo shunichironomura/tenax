@@ -238,8 +238,25 @@ The stream's schema extends a Graphcal session record: `evaluation_id` (16 bytes
 `EvaluationTable::compare` checks a new evaluation of the same requests against a stored one, pairing evaluations by identifier. It counts the rows that are bit-for-bit identical, the rows whose outcome changes (success against failure, or another failure), and, for each differing value, its `OutputPath`, the number of rows in which it differs, and its `Deviation`: the largest relative difference of a quantity or complex value, or `Unequal` for values without a numeric distance.
 
 ```rust
+use tenax::{EvaluationReader, EvaluationTable, Evaluator};
+
 let reference = EvaluationReader::try_new(File::open("evaluations.arrows")?)?.read_table()?;
-let comparison = reference.compare(&table)?;
+// Evaluate the stored requests again, for example on another platform.
+let requests = reference
+    .evaluations()
+    .iter()
+    .map(|evaluation| evaluation.request().clone())
+    .collect::<Vec<_>>();
+let mut fresh = EvaluationTable::new(reference.schema().clone());
+for result in evaluator.evaluate(requests.clone()) {
+    let result = result?;
+    let request = requests
+        .iter()
+        .find(|request| request.id() == result.id())
+        .expect("every result answers one request");
+    fresh.push(request.clone(), result)?;
+}
+let comparison = reference.compare(&fresh)?;
 println!("{} of {} rows identical", comparison.identical_rows(), comparison.rows());
 for difference in comparison.differences() {
     println!("{}: {} rows, {:?}", difference.path(), difference.rows(), difference.deviation());
