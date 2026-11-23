@@ -941,22 +941,19 @@ mod tests {
     fn rich_session() -> Arc<SessionSchema> {
         use graphcal_model_protocol::{
             AlgebraicType, Axis, AxisKind, ConstructorName, ConstructorType, DatetimeType,
-            Dimension, FieldName, FieldType, IndexName, IndexedType, ModelInterface,
-            OutputDescription, ParameterDescription, PortWire, QuantityType, SessionSpec,
-            TimeScale, TypeName,
+            Dimension, FieldName, FieldType, IndexedType, ModelInterface, OutputDescription,
+            ParameterDescription, PortWire, QuantityType, SessionSpec, TimeScale, TypeName,
         };
 
         let name = |name: &str| PortName::new(name).unwrap();
         let length = QuantityType::new(Dimension::dimensionless(), None).unwrap();
-        let phases = Axis::new(
-            IndexName::new("Phase").unwrap(),
-            AxisKind::Named {
-                variants: vec![
-                    VariantName::new("Climb").unwrap(),
-                    VariantName::new("Cruise").unwrap(),
-                ],
-            },
-        )
+        let phases = Axis::new(AxisKind::Named {
+            index: crate::structured_fixture::declared_index("Phase"),
+            variants: vec![
+                VariantName::new("Climb").unwrap(),
+                VariantName::new("Cruise").unwrap(),
+            ],
+        })
         .unwrap();
         let profile =
             WireType::Indexed(IndexedType::new(phases, WireType::Quantity(length.clone())));
@@ -1012,10 +1009,13 @@ mod tests {
 
     #[test]
     fn rich_outputs_round_trip() {
-        use graphcal_model_protocol::{ComplexValue, ConstructorPosition};
+        use graphcal_model_protocol::ComplexValue;
 
         let finite = |value: f64| FiniteF64::new(value).unwrap();
         let session = rich_session();
+        let WireType::Algebraic(shape) = session.outputs()[1].wire() else {
+            panic!("shape must be an algebraic output");
+        };
         let values = |offset: f64, constructor: usize| {
             vec![
                 Value::Indexed(vec![
@@ -1023,7 +1023,7 @@ mod tests {
                     Value::Quantity(finite(offset + 1.0)),
                 ]),
                 Value::Algebraic {
-                    constructor: ConstructorPosition::new(constructor),
+                    constructor: shape.position_at(constructor).unwrap(),
                     fields: if constructor == 0 {
                         vec![Value::Quantity(finite(offset))]
                     } else {

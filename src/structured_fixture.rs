@@ -4,22 +4,42 @@
 use std::sync::Arc;
 
 use graphcal_model_protocol::{
-    AlgebraicType, Axis, AxisKind, BaseDimensionName, Bounds, CanonicalUnitsOnly, ConstructorName,
-    ConstructorPosition, ConstructorType, Dimension, Domain, Exponent, FieldName, FieldType,
-    FiniteF64, IndexName, IndexedType, KeyType, KeyValue, ModelInterface, OutputDescription,
-    ParameterDescription, PortName, PortWire, QuantityType, SessionSchema, SessionSpec, TypeName,
-    UnitSpelling, Value, VariantName, WireType,
+    AlgebraicType, Axis, AxisKind, BaseDimension, BaseDimensionName, Bounds, CanonicalUnitsOnly,
+    ConstructorName, ConstructorPosition, ConstructorType, DeclaredName, Dimension, Domain,
+    Exponent, FieldName, FieldType, FiniteF64, IndexName, IndexedType, KeyType, KeyValue,
+    ModelInterface, OutputDescription, PackageName, ParameterDescription, PortName, PortWire,
+    QuantityType, SessionSchema, SessionSpec, TypeName, UnitSpelling, Value, VariantName, WireType,
 };
 
 use crate::evaluation::OutputRow;
+use crate::model_schema::BUILDER_PACKAGE;
+
+/// The index `name` declared in the root module of the package that
+/// [`crate::ModelSchemaBuilder`] declares its indexes in.
+pub fn declared_index(name: &str) -> DeclaredName<IndexName> {
+    DeclaredName::new(
+        PackageName::new(BUILDER_PACKAGE).unwrap(),
+        Vec::new(),
+        IndexName::new(name).unwrap(),
+    )
+}
+
+/// The prelude base dimension `name` to the first power.
+pub fn base_dimension(name: &str) -> Dimension {
+    Dimension::new([(
+        BaseDimension::prelude(BaseDimensionName::new(name).unwrap()),
+        Exponent::new(1, 1).unwrap(),
+    )])
+    .unwrap()
+}
 
 fn quantity(dimension: &str, unit: &str) -> WireType {
-    let dimension = Dimension::from_iter([(
-        BaseDimensionName::new(dimension).unwrap(),
-        Exponent::new(1, 1).unwrap(),
-    )]);
     WireType::Quantity(
-        QuantityType::new(dimension, Some(UnitSpelling::new(unit).unwrap())).unwrap(),
+        QuantityType::new(
+            base_dimension(dimension),
+            Some(UnitSpelling::new(unit).unwrap()),
+        )
+        .unwrap(),
     )
 }
 
@@ -36,15 +56,13 @@ fn algebraic(name: &str, constructors: Vec<ConstructorType>) -> WireType {
 }
 
 fn named_axis(index: &str, variants: &[&str]) -> Axis {
-    Axis::new(
-        IndexName::new(index).unwrap(),
-        AxisKind::Named {
-            variants: variants
-                .iter()
-                .map(|variant| VariantName::new(*variant).unwrap())
-                .collect(),
-        },
-    )
+    Axis::new(AxisKind::Named {
+        index: declared_index(index),
+        variants: variants
+            .iter()
+            .map(|variant| VariantName::new(*variant).unwrap())
+            .collect(),
+    })
     .unwrap()
 }
 
@@ -112,20 +130,36 @@ pub fn report_session() -> Arc<SessionSchema> {
     Arc::new(interface.configure(&spec, CanonicalUnitsOnly).unwrap())
 }
 
+/// The algebraic type that `wire` carries.
+fn algebraic_type(wire: &WireType) -> &AlgebraicType {
+    let WireType::Algebraic(algebraic) = wire else {
+        panic!("{wire:?} is not an algebraic type");
+    };
+    algebraic
+}
+
+/// The position of the constructor `name` of `algebraic`.
+fn position(algebraic: &AlgebraicType, name: &str) -> ConstructorPosition {
+    algebraic.position(name).unwrap()
+}
+
 /// A `report` value; a `p90` of `None` uses the `Pending` variant.
 pub fn report_value(cost: f64, p90: Option<f64>, checks: [bool; 2], grade: &str) -> Value {
+    let report = report_wire();
+    let report = algebraic_type(&report);
+    let latency = algebraic_type(report.constructors()[0].fields()[1].wire());
     let latency = p90.map_or_else(
         || Value::Algebraic {
-            constructor: ConstructorPosition::new(1),
+            constructor: position(latency, "Pending"),
             fields: vec![],
         },
         |p90| Value::Algebraic {
-            constructor: ConstructorPosition::new(0),
+            constructor: position(latency, "Available"),
             fields: vec![Value::Quantity(FiniteF64::new(p90).unwrap())],
         },
     );
     Value::Algebraic {
-        constructor: ConstructorPosition::new(0),
+        constructor: position(report, "Report"),
         fields: vec![
             Value::Quantity(FiniteF64::new(cost).unwrap()),
             latency,

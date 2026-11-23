@@ -34,7 +34,7 @@ pub enum EvaluationDatasetError {
         /// The chosen output.
         output: PortName,
         /// Its wire type.
-        wire: WireType,
+        wire: Box<WireType>,
     },
 
     /// One row records a model or validation failure.
@@ -138,7 +138,7 @@ impl EvaluationTable {
         let selected = self.selected_output(output)?;
         let inapplicable = || EvaluationDatasetError::InapplicableRule {
             output: selected.name().clone(),
-            wire: selected.wire().clone(),
+            wire: Box::new(selected.wire().clone()),
         };
         if !rule.applies_to(selected.wire()) {
             return Err(inapplicable());
@@ -455,26 +455,24 @@ mod tests {
 
     #[test]
     fn key_labels_name_fin_positions_and_coordinates() {
-        use graphcal_model_protocol::{Axis, AxisKind, Dimension, IndexName};
+        use graphcal_model_protocol::{Axis, AxisKind, Dimension};
 
-        let key = |index: &str, kind| {
-            KeyType::new(Axis::new(IndexName::new(index).unwrap(), kind).unwrap())
-        };
+        use crate::structured_fixture::declared_index;
+
+        let key = |kind| KeyType::new(Axis::new(kind).unwrap());
         assert_eq!(
-            key_labels(&key("Fin(3)", AxisKind::Finite { size: 3 })),
+            key_labels(&key(AxisKind::Finite { size: 3 })),
             ["0", "1", "2"]
         );
         let coordinates = [0.0, 0.5]
             .map(|coordinate| FiniteF64::new(coordinate).unwrap())
             .to_vec();
         assert_eq!(
-            key_labels(&key(
-                "Step",
-                AxisKind::Coordinate {
-                    dimension: Dimension::dimensionless(),
-                    coordinates,
-                }
-            )),
+            key_labels(&key(AxisKind::Coordinate {
+                index: declared_index("Step"),
+                dimension: Dimension::dimensionless(),
+                coordinates,
+            })),
             ["0", "0.5"]
         );
     }
@@ -621,8 +619,8 @@ mod tests {
 
         assert!(matches!(
             table(&schema, [(request, result)]).cases(count),
-            Err(EvaluationDatasetError::InapplicableRule { output, wire: WireType::Int })
-                if output.as_str() == "count"
+            Err(EvaluationDatasetError::InapplicableRule { output, wire })
+                if output.as_str() == "count" && *wire == WireType::Int
         ));
     }
 

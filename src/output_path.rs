@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::evaluation::OutputRow;
 use crate::evaluation_dataset::key_label;
+use crate::model_schema::axis_spelling;
 
 /// Why a path does not select a value of a session's outputs.
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -183,7 +184,7 @@ impl OutputPath {
                         Some(key) => path.entry(key.as_key_ref()),
                         None => Err(OutputPathError::UnknownKey {
                             path: path.to_string(),
-                            index: axis.index().to_string(),
+                            index: axis_spelling(axis),
                             key: segment.to_owned(),
                         }),
                     }
@@ -286,7 +287,7 @@ impl OutputPath {
             .position(key)
             .ok_or_else(|| OutputPathError::UnknownKey {
                 path: self.to_string(),
-                index: indexed.axis().index().to_string(),
+                index: axis_spelling(indexed.axis()),
                 key: key_label(key),
             })?;
         let element = indexed.element().clone();
@@ -493,7 +494,7 @@ mod tests {
             ),
             (
                 "report.checks.Third",
-                "report.checks: index Check has no entry 'Third'",
+                "report.checks: index tenax.Check has no entry 'Third'",
             ),
             (
                 "report.cost.more",
